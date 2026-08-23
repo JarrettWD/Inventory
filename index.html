@@ -6,6 +6,17 @@
 <meta name="color-scheme" content="light dark">
 <meta name="description" content="Basement Food Inventory Tracker - a simple personal food inventory app.">
 <title>Basement Food Inventory Tracker</title>
+
+<!-- Installable web app (PWA). Needs to be served over HTTPS or localhost;
+     none of this activates when the file is opened directly from disk. -->
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#1f6feb" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#12151a" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="application-name" content="Food Stock">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="icons/icon-512.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
 <style>
 /* ============================================================
    DESIGN TOKENS
@@ -391,6 +402,11 @@ details.optional summary{
       </div>
     </div>
     <div class="card stack">
+      <h2>Connection</h2>
+      <p class="small muted" id="connSummary"></p>
+      <button class="btn wide" id="btnEditConnection">Change connection</button>
+    </div>
+    <div class="card stack">
       <h2>Data</h2>
       <p class="small muted" id="dataStatus"></p>
       <button class="btn wide" id="btnExport">Export snapshot (.json)</button>
@@ -472,6 +488,40 @@ details.optional summary{
   </form>
 </dialog>
 
+<!-- ============ FIRST-RUN CONNECTION SETUP ============ -->
+<dialog id="setupDialog" aria-labelledby="setupTitle">
+  <form id="setupForm" method="dialog">
+    <div class="dlg-head">
+      <h2 id="setupTitle">Connect to Supabase</h2>
+      <button type="button" class="btn sm" id="btnSetupClose" hidden>Close</button>
+    </div>
+    <div class="dlg-body">
+      <p class="small muted">Your food list is stored in your own Supabase project. Paste the
+        project URL and publishable key from <strong>Project Settings &rarr; API keys</strong>.
+        They are saved on this device only, not shared with anyone.</p>
+
+      <div class="field">
+        <label for="setupUrl">Project URL</label>
+        <input id="setupUrl" placeholder="https://your-ref.supabase.co" autocomplete="off" spellcheck="false" inputmode="url">
+        <div class="hint small muted">A dashboard link or a bare project ref works too.</div>
+      </div>
+
+      <div class="field">
+        <label for="setupKey">Publishable key <span class="hint">(the anon / public one)</span></label>
+        <input id="setupKey" placeholder="sb_publishable_..." autocomplete="off" spellcheck="false">
+        <div class="hint small muted">Never paste a secret or service-role key here - it would be
+          readable by anyone using the app.</div>
+      </div>
+
+      <div id="setupResult"></div>
+    </div>
+    <div class="dlg-foot">
+      <button type="button" class="btn danger" id="btnSetupForget" hidden>Forget</button>
+      <button type="submit" class="btn primary" id="btnSetupSave">Test and save</button>
+    </div>
+  </form>
+</dialog>
+
 <div id="toast" role="status" aria-live="polite"></div>
 
 <!-- Connection settings. Gitignored; copy config.example.js if it is missing. -->
@@ -549,10 +599,40 @@ let state = { items: [], settings: { ...DEFAULT_SETTINGS } };
 /** Connection state, shown in the bar under the header. */
 let conn = { configured: false, online: true, lastError: '', fromCache: false };
 
-const cfg = (typeof window !== 'undefined' && window.APP_CONFIG) || {};
-const SUPABASE_URL = String(cfg.supabaseUrl || '').replace(/\/+$/, '');
-const SUPABASE_KEY = String(cfg.supabaseKey || '');
-const TABLE = cfg.table || 'inventory';
+/* Connection details. Resolved at start-up from, in order:
+     1. what the user entered on this device (localStorage), then
+     2. config.js, if the deployment ships one (handy for local development).
+   Nothing is baked into this file, so the app can be hosted publicly and each
+   person connects it to their own project on first run. */
+const CONNECTION_KEY = STORAGE_KEY + '.connection';
+let SUPABASE_URL = '';
+let SUPABASE_KEY = '';
+let TABLE = 'inventory';
+
+/**
+ * Accept whatever form of the project address someone pastes and turn it into
+ * the API origin: a dashboard link, a bare project ref, or the URL itself.
+ */
+function normalizeSupabaseUrl(input) {
+  let s = String(input || '').trim();
+  if (!s) return '';
+  const dashboard = s.match(/supabase\.(?:com|io)\/dashboard\/project\/([a-z0-9]+)/i);
+  if (dashboard) return `https://${dashboard[1]}.supabase.co`;
+  if (/^[a-z0-9]{16,}$/i.test(s)) return `https://${s}.supabase.co`;   // bare ref
+  if (!/^https?:\/\//i.test(s)) s = 'https://' + s;
+  return s.replace(/\/+$/, '');
+}
+
+/** Read the saved connection into the module-level values. */
+function applyConnection(source) {
+  SUPABASE_URL = normalizeSupabaseUrl(source.supabaseUrl);
+  SUPABASE_KEY = String(source.supabaseKey || '').trim();
+  TABLE = source.table || 'inventory';
+  return Boolean(
+    SUPABASE_URL && SUPABASE_KEY &&
+    !/YOUR-PROJECT-REF|YOUR-PUBLISHABLE-KEY/.test(SUPABASE_URL + SUPABASE_KEY)
+  );
+}
 
 /* ---------- localStorage: preferences + offline cache only ---------- */
 
@@ -715,12 +795,38 @@ async function loadItems({ quiet = false } = {}) {
 /** Load household preferences (local) and then the inventory (cloud). */
 async function load() {
   state.settings = { ...DEFAULT_SETTINGS, ...readLocal(STORAGE_KEY + '.settings', {}) };
-  conn.configured = Boolean(
-    SUPABASE_URL && SUPABASE_KEY &&
-    !SUPABASE_URL.includes('YOUR-PROJECT-REF') &&
-    !SUPABASE_KEY.includes('YOUR-PUBLISHABLE-KEY')
-  );
-  await loadItems();
+  const saved = readLocal(CONNECTION_KEY, null);
+  conn.configured = applyConnection(saved || (typeof window !== 'undefined' && window.APP_CONFIG) || {});
+  if (conn.configured) await loadItems();
+  else renderConnBar();
+}
+
+/**
+ * Check a URL and key actually work before saving them, and say something
+ * useful when they do not - the two common failures are a mistyped key and a
+ * project where schema.sql has not been run yet.
+ */
+async function testConnection(url, key) {
+  let res;
+  try {
+    res = await fetch(`${url}/rest/v1/${TABLE}?select=id&limit=1`,
+      { headers: { apikey: key, Authorization: 'Bearer ' + key } });
+  } catch (err) {
+    return { ok: false, message: 'Could not reach that address. Check the project URL.' };
+  }
+  if (res.ok) return { ok: true, message: 'Connected.' };
+
+  const text = await res.text();
+  if (res.status === 401 || res.status === 403) {
+    return { ok: false, message: 'That key was rejected. Copy the publishable (anon) key from Project Settings, API keys.' };
+  }
+  if (text.includes('PGRST205')) {
+    return { ok: false, needsTable: true,
+      message: `Connected, but there is no "${TABLE}" table yet. Run supabase/schema.sql in the SQL editor, then try again.` };
+  }
+  let detail = text.slice(0, 160);
+  try { detail = JSON.parse(text).message || detail; } catch (e) { /* keep raw */ }
+  return { ok: false, message: detail };
 }
 
 /* ---------- Connection banner ---------- */
@@ -732,7 +838,7 @@ function renderConnBar() {
 
   if (!conn.configured) {
     error = true;
-    html = 'Supabase is not configured. Copy <strong>config.example.js</strong> to <strong>config.js</strong> and add your project URL and key.';
+    html = 'Not connected to a Supabase project yet.<button type="button" data-act="setup">Set up</button>';
   } else if (!conn.online) {
     error = true;
     html = `Cannot reach Supabase - ${esc(conn.lastError)}. ` +
@@ -1452,8 +1558,18 @@ function wireEvents() {
       removeSetting(act === 'remove-category' ? 'categories' : 'locations', btn.dataset.value);
     } else if (act === 'retry') {
       refreshFromCloud();
+    } else if (act === 'setup') {
+      openSetup({ firstRun: !conn.configured });
     }
   });
+
+  // Connection setup
+  $('#setupForm').addEventListener('submit', saveSetup);
+  $('#btnSetupClose').addEventListener('click', () => $('#setupDialog').close());
+  $('#btnSetupForget').addEventListener('click', forgetConnection);
+  $('#btnEditConnection').addEventListener('click', () => openSetup({ firstRun: false }));
+  // Keep the first-run dialog up until a connection is entered.
+  $('#setupDialog').addEventListener('cancel', (e) => { if (!conn.configured) e.preventDefault(); });
 
   // Pull other people's changes when the inventory or shopping views open.
   $$('.tabs button').forEach((b) => b.addEventListener('click', () => {
@@ -1568,16 +1684,145 @@ async function seedSampleData() {
   }
 }
 
+/* ==========================================================================
+   8. CONNECTION SETUP SCREEN
+   ========================================================================== */
+
+/** Open the setup dialog. When nothing is configured yet it cannot be dismissed. */
+function openSetup({ firstRun = false } = {}) {
+  const saved = readLocal(CONNECTION_KEY, null) || {};
+  $('#setupUrl').value = saved.supabaseUrl || '';
+  $('#setupKey').value = saved.supabaseKey || '';
+  $('#setupResult').innerHTML = '';
+  $('#btnSetupClose').hidden = firstRun;
+  $('#btnSetupForget').hidden = firstRun || !readLocal(CONNECTION_KEY, null);
+  $('#setupTitle').textContent = firstRun ? 'Connect to Supabase' : 'Change connection';
+  const dlg = $('#setupDialog');
+  if (!dlg.open) dlg.showModal();
+  setTimeout(() => $('#setupUrl').focus(), 50);
+}
+
+function setupMessage(html, isError) {
+  $('#setupResult').innerHTML =
+    `<div class="dup-warn" style="${isError ? 'border-color:var(--danger);background:var(--danger-bg)' : ''}">
+       <p class="small" style="margin:0;${isError ? 'color:var(--danger)' : ''}">${html}</p>
+     </div>`;
+}
+
+async function saveSetup(event) {
+  event.preventDefault();
+  const url = normalizeSupabaseUrl($('#setupUrl').value);
+  const key = $('#setupKey').value.trim();
+
+  if (!url || !key) { setupMessage('Please fill in both fields.', true); return; }
+  if (/^sb_secret_/i.test(key) || /service_role/i.test(key)) {
+    setupMessage('That looks like a secret key. Use the publishable (anon) key - a secret key would be readable by anyone using the app.', true);
+    return;
+  }
+
+  const btn = $('#btnSetupSave');
+  btn.classList.add('busy');
+  btn.textContent = 'Testing...';
+  setupMessage('Checking the connection...', false);
+
+  // testConnection reads TABLE, so set it first and put it back if we bail out.
+  const previousTable = TABLE;
+  TABLE = (readLocal(CONNECTION_KEY, null) || {}).table || 'inventory';
+  const result = await testConnection(url, key);
+
+  btn.classList.remove('busy');
+  btn.textContent = 'Test and save';
+
+  if (!result.ok && !result.needsTable) {
+    TABLE = previousTable;             // leave the working connection alone
+    setupMessage(esc(result.message), true);
+    return;
+  }
+
+  // A missing table is worth saving through: the details are right, and the
+  // app will show the same message on its banner until schema.sql is run.
+  writeLocal(CONNECTION_KEY, { supabaseUrl: url, supabaseKey: key, table: TABLE });
+  conn.configured = applyConnection({ supabaseUrl: url, supabaseKey: key, table: TABLE });
+  $('#setupDialog').close();
+
+  if (result.needsTable) toast('Saved - now run schema.sql in Supabase');
+  else toast('Connected');
+
+  await loadItems();
+  render();
+  renderConnectionSummary();
+}
+
+function forgetConnection() {
+  if (!confirm('Forget this connection? Your food data stays in Supabase; this only clears the details from this device.')) return;
+  try { localStorage.removeItem(CONNECTION_KEY); } catch (e) { /* nothing to clear */ }
+  try { localStorage.removeItem(STORAGE_KEY + '.cache'); } catch (e) { /* nothing to clear */ }
+  state.items = [];
+  conn.configured = applyConnection((typeof window !== 'undefined' && window.APP_CONFIG) || {});
+  $('#setupDialog').close();
+  render();
+  renderConnectionSummary();
+  if (!conn.configured) openSetup({ firstRun: true });
+}
+
+function renderConnectionSummary() {
+  const saved = readLocal(CONNECTION_KEY, null);
+  const el = $('#connSummary');
+  if (!el) return;
+  if (conn.configured) {
+    const host = (() => { try { return new URL(SUPABASE_URL).host; } catch (e) { return SUPABASE_URL; } })();
+    el.textContent = `Connected to ${host}, table "${TABLE}"`
+      + (saved ? ' (saved on this device).' : ' (from config.js).');
+  } else {
+    el.textContent = 'Not connected to a Supabase project yet.';
+  }
+}
+
+
+/* ==========================================================================
+   9. INSTALLABLE APP (PWA)
+   ========================================================================== */
+
+/**
+ * Register the service worker that caches the app shell for offline launch.
+ * Service workers are only allowed on https:// or localhost, so this is a
+ * no-op when index.html is opened straight from disk - the app still works,
+ * it just cannot be installed that way.
+ */
+function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  if (!/^https?:$/.test(location.protocol)) return;
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js')
+      .catch((err) => console.warn('Service worker did not register:', err));
+  });
+}
+
+/** Honour ?view=shopping etc, used by the launcher shortcuts in manifest.json. */
+function startingView() {
+  const wanted = new URLSearchParams(location.search).get('view');
+  return ['dashboard', 'inventory', 'expiring', 'shopping', 'settings'].includes(wanted) ? wanted : null;
+}
+
 async function init() {
+  registerServiceWorker();
   $('#todayLabel').textContent = formatDate(todayISO());
   wireEvents();
   await load();                 // preferences from this device, items from Supabase
   refreshDropdowns();
   render();
+
+  const view = startingView();
+  if (view) showView(view);
+
+  renderConnectionSummary();
   $('#dataStatus').textContent = conn.configured
     ? `Items are stored in Supabase (table "${TABLE}"). Categories, locations and rules are kept on this device only.`
-    : 'Not connected to Supabase - see the message at the top of the app.';
-  if (!storageWorks) toast('This browser blocks local storage, so preferences will not stick');
+    : 'Not connected to Supabase yet.';
+
+  // First run on a fresh device: ask for the project details before anything else.
+  if (!conn.configured) openSetup({ firstRun: true });
+  if (!storageWorks) toast('This browser blocks local storage, so the connection will not be remembered');
 }
 
 init();
