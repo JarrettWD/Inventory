@@ -1,0 +1,1586 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="Basement Food Inventory Tracker - a simple personal food inventory app.">
+<title>Basement Food Inventory Tracker</title>
+<style>
+/* ============================================================
+   DESIGN TOKENS
+   Light palette on :root, dark overrides in the media query.
+   High contrast + large tap targets (accessibility requirement).
+   ============================================================ */
+:root{
+  --bg:#f4f5f7;
+  --surface:#ffffff;
+  --surface-2:#eef0f3;
+  --text:#14181f;
+  --text-dim:#5b6472;
+  --border:#d7dbe2;
+  --accent:#1f6feb;
+  --accent-text:#ffffff;
+  --danger:#c62828;      /* expired */
+  --danger-bg:#fdecec;
+  --warn:#a35a00;        /* expiring soon */
+  --warn-bg:#fff4e2;
+  --ok:#1c7a43;          /* healthy stock */
+  --ok-bg:#e7f6ed;
+  --info:#5b3fa8;        /* duplicates / needs review */
+  --info-bg:#f0ebfb;
+  --radius:12px;
+  --tap:44px;            /* minimum tap target size */
+  --shadow:0 1px 2px rgba(0,0,0,.06), 0 4px 14px rgba(0,0,0,.06);
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#12151a;
+    --surface:#1b1f26;
+    --surface-2:#232830;
+    --text:#eef1f6;
+    --text-dim:#a2acbb;
+    --border:#333a45;
+    --accent:#5b9bff;
+    --accent-text:#06121f;
+    --danger:#ff8a80; --danger-bg:#3a1f1f;
+    --warn:#ffc46b;    --warn-bg:#3a2d16;
+    --ok:#6fd39b;      --ok-bg:#16311f;
+    --info:#c0a9ff;    --info-bg:#2a2340;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 4px 14px rgba(0,0,0,.35);
+  }
+}
+
+/* ---------- Base ---------- */
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg); color:var(--text);
+  font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  -webkit-text-size-adjust:100%;
+  padding-bottom:calc(72px + env(safe-area-inset-bottom)); /* room for mobile tab bar */
+}
+h1,h2,h3{margin:0;line-height:1.25}
+h2{font-size:1.15rem}
+h3{font-size:1rem}
+p{margin:.35em 0}
+button,input,select,textarea{font:inherit;color:inherit}
+:focus-visible{outline:3px solid var(--accent); outline-offset:2px; border-radius:6px}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+
+/* ---------- App bar ---------- */
+.appbar{
+  position:sticky; top:0; z-index:30;
+  display:flex; align-items:center; gap:10px;
+  padding:10px 14px; padding-top:calc(10px + env(safe-area-inset-top));
+  background:var(--surface); border-bottom:1px solid var(--border);
+}
+.appbar h1{font-size:1.05rem; flex:1; letter-spacing:-.01em}
+.appbar .sub{display:block;font-size:.72rem;font-weight:400;color:var(--text-dim)}
+
+/* ---------- Buttons ---------- */
+.btn{
+  min-height:var(--tap); padding:0 14px;
+  display:inline-flex; align-items:center; justify-content:center; gap:6px;
+  background:var(--surface-2); color:var(--text);
+  border:1px solid var(--border); border-radius:10px;
+  font-weight:600; cursor:pointer;
+}
+.btn:hover{filter:brightness(.97)}
+.btn.primary{background:var(--accent); color:var(--accent-text); border-color:transparent}
+.btn.ghost{background:transparent; border-color:transparent; color:var(--accent)}
+.btn.danger{background:transparent; border-color:var(--border); color:var(--danger)}
+.btn.sm{min-height:36px; padding:0 10px; font-size:.85rem; border-radius:8px}
+.btn.wide{width:100%}
+
+/* ---------- Tab navigation (bottom bar on phone, inline on desktop) ---------- */
+.tabs{
+  position:fixed; left:0; right:0; bottom:0; z-index:30;
+  display:grid; grid-template-columns:repeat(5,1fr);
+  background:var(--surface); border-top:1px solid var(--border);
+  padding-bottom:env(safe-area-inset-bottom);
+}
+.tabs button{
+  position:relative;
+  min-height:var(--tap); padding:8px 2px 10px;
+  background:none; border:0; cursor:pointer;
+  display:flex; flex-direction:column; align-items:center; gap:2px;
+  font-size:.68rem; font-weight:600; color:var(--text-dim);
+}
+.tabs button .ico{font-size:1.15rem; line-height:1}
+.tabs button[aria-selected="true"]{color:var(--accent)}
+.tabs .pip{
+  position:absolute; top:4px; left:50%; margin-left:6px;
+  min-width:17px; height:17px; padding:0 4px; border-radius:9px;
+  background:var(--danger); color:#fff; font-size:.62rem; line-height:17px; font-weight:700;
+}
+@media (min-width:760px){
+  body{padding-bottom:24px}
+  .tabs{position:sticky; top:57px; bottom:auto; border-top:0; border-bottom:1px solid var(--border);
+        grid-template-columns:repeat(5,max-content); gap:4px; padding:6px 10px}
+  .tabs button{flex-direction:row; font-size:.9rem; padding:8px 14px; border-radius:10px}
+  .tabs button[aria-selected="true"]{background:var(--surface-2)}
+  .tabs .pip{position:static; margin-left:2px}
+}
+
+/* ---------- Layout ---------- */
+main{max-width:900px; margin:0 auto; padding:14px}
+.view{display:none}
+.view.active{display:block}
+.stack > * + *{margin-top:12px}
+
+.card{
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:var(--radius); padding:14px; box-shadow:var(--shadow);
+}
+.card > h2{margin-bottom:8px}
+.muted{color:var(--text-dim)}
+.small{font-size:.85rem}
+.empty{color:var(--text-dim); padding:18px 4px; text-align:center}
+.section-head{display:flex; align-items:center; gap:8px; margin-bottom:6px}
+.section-head h3{flex:1}
+
+/* ---------- Dashboard stat tiles ---------- */
+.stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px}
+.stat{
+  min-height:var(--tap); text-align:left; cursor:pointer; width:100%;
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:var(--radius); padding:12px; box-shadow:var(--shadow);
+}
+.stat .n{font-size:1.7rem; font-weight:700; line-height:1.1}
+.stat .l{font-size:.82rem; color:var(--text-dim)}
+.stat.is-danger .n{color:var(--danger)}
+.stat.is-warn   .n{color:var(--warn)}
+.stat.is-info   .n{color:var(--info)}
+.stat.is-ok     .n{color:var(--ok)}
+
+/* ---------- Badges ---------- */
+.badge{
+  display:inline-block; padding:2px 8px; border-radius:999px;
+  font-size:.72rem; font-weight:700; white-space:nowrap;
+  background:var(--surface-2); color:var(--text-dim); border:1px solid var(--border);
+}
+.badge.expired {background:var(--danger-bg); color:var(--danger); border-color:transparent}
+.badge.expiring{background:var(--warn-bg);   color:var(--warn);   border-color:transparent}
+.badge.fresh   {background:var(--ok-bg);     color:var(--ok);     border-color:transparent}
+.badge.dup     {background:var(--info-bg);   color:var(--info);   border-color:transparent}
+.badge.low     {background:var(--warn-bg);   color:var(--warn);   border-color:transparent}
+.badge.review  {background:var(--info-bg);   color:var(--info);   border-color:transparent}
+
+/* ---------- Item rows ---------- */
+.list{list-style:none; margin:0; padding:0}
+.item{
+  display:flex; align-items:flex-start; gap:10px;
+  padding:12px 4px; border-bottom:1px solid var(--border);
+}
+.item:last-child{border-bottom:0}
+.item .body{flex:1; min-width:0}
+.item .name{font-weight:650; word-break:break-word}
+.item .meta{font-size:.83rem; color:var(--text-dim); margin-top:2px}
+.item .badges{display:flex; flex-wrap:wrap; gap:5px; margin-top:6px}
+.item .qty{
+  min-width:58px; text-align:center; padding:6px 4px; border-radius:10px;
+  background:var(--surface-2); font-weight:700; line-height:1.15;
+}
+.item .qty small{display:block; font-size:.62rem; font-weight:600; color:var(--text-dim)}
+.item .actions{display:flex; flex-direction:column; gap:6px; align-items:stretch}
+.qtybtns{display:flex; gap:6px}
+.qtybtns .btn{min-width:38px; padding:0; font-size:1.05rem}
+.row-strip{border-left:4px solid transparent; padding-left:8px}
+.row-strip.expired {border-left-color:var(--danger)}
+.row-strip.expiring{border-left-color:var(--warn)}
+.row-strip.low     {border-left-color:var(--warn)}
+
+/* ---------- Filters ---------- */
+.search{
+  width:100%; min-height:var(--tap); padding:10px 12px;
+  background:var(--surface); color:var(--text);
+  border:1px solid var(--border); border-radius:10px; font-size:1rem;
+}
+.filters{display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:8px; margin-top:8px}
+.filters select{
+  min-height:var(--tap); width:100%; padding:8px 10px;
+  background:var(--surface); border:1px solid var(--border); border-radius:10px;
+}
+
+/* ---------- Forms ---------- */
+dialog{
+  width:min(560px,100%); max-height:92dvh; padding:0; border:0;
+  border-radius:16px 16px 0 0; background:var(--surface); color:var(--text);
+  margin:auto auto 0; box-shadow:var(--shadow);
+}
+@media (min-width:760px){ dialog{border-radius:16px; margin:auto} }
+dialog::backdrop{background:rgba(0,0,0,.5)}
+.dlg-head{
+  position:sticky; top:0; background:var(--surface); z-index:2;
+  display:flex; align-items:center; gap:10px;
+  padding:14px; border-bottom:1px solid var(--border);
+}
+.dlg-head h2{flex:1; font-size:1.05rem}
+.dlg-body{padding:14px; overflow:auto}
+.dlg-foot{
+  position:sticky; bottom:0; background:var(--surface);
+  display:flex; gap:10px; padding:12px 14px; padding-bottom:calc(12px + env(safe-area-inset-bottom));
+  border-top:1px solid var(--border);
+}
+.dlg-foot .btn{flex:1}
+.field{margin-bottom:12px}
+.field label{display:block; font-size:.85rem; font-weight:650; margin-bottom:4px}
+.field .hint{font-weight:400; color:var(--text-dim)}
+.field input, .field select, .field textarea{
+  width:100%; min-height:var(--tap); padding:10px 12px;
+  background:var(--bg); color:var(--text);
+  border:1px solid var(--border); border-radius:10px;
+}
+.field textarea{min-height:70px; resize:vertical}
+.grid2{display:grid; grid-template-columns:1fr 1fr; gap:10px}
+.check{display:flex; align-items:center; gap:10px; min-height:var(--tap)}
+.check input{width:22px; height:22px; min-height:0}
+details.optional summary{
+  min-height:var(--tap); display:flex; align-items:center;
+  cursor:pointer; font-weight:650; color:var(--accent);
+}
+.error{color:var(--danger); font-size:.85rem; margin-top:4px}
+
+/* Duplicate warning panel shown inside the add/edit form */
+.dup-warn{
+  background:var(--info-bg); border:1px solid var(--info);
+  border-radius:10px; padding:10px 12px; margin-bottom:12px;
+}
+.dup-warn h3{font-size:.9rem; color:var(--info); margin-bottom:6px}
+.dup-warn ul{margin:0 0 8px; padding-left:18px; font-size:.87rem}
+.dup-warn li{margin:3px 0}
+
+/* ---------- Connection bar ---------- */
+#connBar{
+  padding:10px 14px; font-size:.85rem; font-weight:600; text-align:center;
+  background:var(--warn-bg); color:var(--warn);
+  border-bottom:1px solid var(--border);
+}
+#connBar.is-error{background:var(--danger-bg); color:var(--danger)}
+#connBar button{
+  margin-left:8px; min-height:32px; padding:0 10px; border-radius:8px; cursor:pointer;
+  background:transparent; border:1px solid currentColor; color:inherit; font-weight:700;
+}
+.busy{opacity:.55; pointer-events:none}
+
+/* ---------- Toast ---------- */
+#toast{
+  position:fixed; left:50%; transform:translateX(-50%);
+  bottom:calc(84px + env(safe-area-inset-bottom)); z-index:60;
+  background:var(--text); color:var(--bg);
+  padding:10px 16px; border-radius:999px; font-size:.9rem; font-weight:600;
+  opacity:0; pointer-events:none; transition:opacity .2s;
+}
+#toast.show{opacity:1}
+@media (min-width:760px){ #toast{bottom:24px} }
+</style>
+</head>
+<body>
+
+<header class="appbar">
+  <h1>Basement Food Inventory<span class="sub" id="todayLabel"></span></h1>
+  <button class="btn sm" id="btnRefresh" title="Reload from Supabase" aria-label="Reload from Supabase">&#8635;</button>
+  <button class="btn primary" id="btnAdd">+ Add</button>
+</header>
+
+<!-- Connection state. Hidden while everything is working normally. -->
+<div id="connBar" hidden></div>
+
+<!-- Simple 5-tab navigation. "Expired" lives at the top of the Expiring view. -->
+<nav class="tabs" role="tablist" aria-label="Main">
+  <button role="tab" data-view="dashboard" aria-selected="true"><span class="ico">&#127968;</span>Home</button>
+  <button role="tab" data-view="inventory" aria-selected="false"><span class="ico">&#128230;</span>Inventory</button>
+  <button role="tab" data-view="expiring"  aria-selected="false"><span class="ico">&#9200;</span>Expiring<span class="pip" id="pipExpiring" hidden></span></button>
+  <button role="tab" data-view="shopping"  aria-selected="false"><span class="ico">&#128722;</span>Shopping</button>
+  <button role="tab" data-view="settings"  aria-selected="false"><span class="ico">&#9881;</span>Settings</button>
+</nav>
+
+<main>
+  <!-- ============ HOME DASHBOARD ============ -->
+  <section id="view-dashboard" class="view active stack" role="tabpanel" aria-label="Home dashboard">
+    <div class="stats" id="statTiles"></div>
+    <div class="card"><h2>Use first</h2><ul class="list" id="listUseFirst"></ul></div>
+    <div class="card"><h2>Possible duplicates</h2><div id="listDuplicates"></div></div>
+    <div class="card"><h2>Missing expiry date</h2><ul class="list" id="listNoExpiry"></ul></div>
+    <div class="card"><h2>Recently added</h2><ul class="list" id="listRecent"></ul></div>
+  </section>
+
+  <!-- ============ INVENTORY LIST ============ -->
+  <section id="view-inventory" class="view stack" role="tabpanel" aria-label="Inventory">
+    <div class="card">
+      <label class="sr-only" for="q">Search food items</label>
+      <input class="search" id="q" type="search" placeholder="Search food (e.g. tomatoes)" autocomplete="off">
+      <div class="filters">
+        <select id="fCategory" aria-label="Filter by category"></select>
+        <select id="fLocation" aria-label="Filter by location"></select>
+        <select id="fStatus" aria-label="Filter by status">
+          <option value="all">All statuses</option>
+          <option value="expired">Expired</option>
+          <option value="expiring">Expiring soon</option>
+          <option value="fresh">In date</option>
+          <option value="none">No expiry date</option>
+          <option value="low">Low stock</option>
+          <option value="dup">Possible duplicates</option>
+          <option value="opened">Opened</option>
+        </select>
+        <select id="fSort" aria-label="Sort by">
+          <option value="expiry">Sort: expiry (soonest)</option>
+          <option value="name">Sort: name (A-Z)</option>
+          <option value="qty">Sort: quantity (lowest)</option>
+          <option value="added">Sort: recently added</option>
+        </select>
+      </div>
+    </div>
+    <div class="card">
+      <p class="small muted" id="invCount"></p>
+      <ul class="list" id="listInventory"></ul>
+    </div>
+  </section>
+
+  <!-- ============ EXPIRING SOON (expired first, then 0-30 / 31-60 / 61-90) ============ -->
+  <section id="view-expiring" class="view stack" role="tabpanel" aria-label="Expiring soon">
+    <div id="expiringGroups" class="stack"></div>
+  </section>
+
+  <!-- ============ SHOPPING LIST ============ -->
+  <section id="view-shopping" class="view stack" role="tabpanel" aria-label="Shopping list">
+    <div class="card">
+      <div class="section-head"><h2>Buy soon</h2>
+        <button class="btn sm" id="btnCopyList">Copy list</button>
+      </div>
+      <p class="small muted">Low stock, out of stock, or added by hand.</p>
+      <ul class="list" id="listBuy"></ul>
+    </div>
+    <div class="card">
+      <h2>Do not buy - already in stock</h2>
+      <label class="sr-only" for="qShop">Check an item before buying</label>
+      <input class="search" id="qShop" type="search" placeholder="Check before you buy (e.g. pasta)" autocomplete="off" style="margin:8px 0">
+      <ul class="list" id="listAvoid"></ul>
+    </div>
+  </section>
+
+  <!-- ============ SETTINGS ============ -->
+  <section id="view-settings" class="view stack" role="tabpanel" aria-label="Settings">
+    <div class="card">
+      <h2>Rules</h2>
+      <div class="field">
+        <label for="setExpiryDays">Flag as "expiring soon" within <span class="hint">days</span></label>
+        <input id="setExpiryDays" type="number" min="1" max="365" step="1">
+      </div>
+      <div class="field">
+        <label for="setLowStock">Default low-stock threshold <span class="hint">add to shopping list when quantity is at or below this</span></label>
+        <input id="setLowStock" type="number" min="0" max="99" step="1">
+      </div>
+      <button class="btn primary wide" id="btnSaveRules">Save rules</button>
+    </div>
+    <div class="card">
+      <h2>Categories</h2>
+      <div id="chipCategories" class="stack"></div>
+      <div class="grid2" style="margin-top:10px">
+        <input id="newCategory" class="search" placeholder="New category">
+        <button class="btn" id="btnAddCategory">Add</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Storage locations</h2>
+      <div id="chipLocations" class="stack"></div>
+      <div class="grid2" style="margin-top:10px">
+        <input id="newLocation" class="search" placeholder="New location">
+        <button class="btn" id="btnAddLocation">Add</button>
+      </div>
+    </div>
+    <div class="card stack">
+      <h2>Data</h2>
+      <p class="small muted" id="dataStatus"></p>
+      <button class="btn wide" id="btnExport">Export snapshot (.json)</button>
+      <button class="btn wide" id="btnImport">Import items from file</button>
+      <input type="file" id="fileImport" accept="application/json" hidden>
+      <button class="btn wide" id="btnSeed">Load sample data into Supabase</button>
+    </div>
+  </section>
+</main>
+
+<!-- ============ ADD / EDIT ITEM FORM ============ -->
+<dialog id="itemDialog" aria-labelledby="dlgTitle">
+  <form id="itemForm" method="dialog">
+    <div class="dlg-head">
+      <h2 id="dlgTitle">Add item</h2>
+      <button type="button" class="btn sm" id="btnCancel">Close</button>
+    </div>
+    <div class="dlg-body">
+      <div id="dupWarn"></div>
+
+      <div class="field">
+        <label for="fName">Item name *</label>
+        <input id="fName" required autocomplete="off" placeholder="Canned tomatoes">
+        <div class="error" id="errName" hidden>Please enter a name.</div>
+      </div>
+
+      <div class="grid2">
+        <div class="field">
+          <label for="fCat">Category *</label>
+          <select id="fCat" required></select>
+        </div>
+        <div class="field">
+          <label for="fLoc">Location *</label>
+          <select id="fLoc" required></select>
+        </div>
+      </div>
+
+      <div class="grid2">
+        <div class="field">
+          <label for="fQty">Quantity *</label>
+          <input id="fQty" type="number" inputmode="decimal" min="0" step="0.5" required value="1">
+        </div>
+        <div class="field">
+          <label for="fUnit">Unit</label>
+          <select id="fUnit"></select>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="fExpiry">Expiry / best before <span class="hint">leave blank if none on the package</span></label>
+        <input id="fExpiry" type="date">
+      </div>
+
+      <details class="optional">
+        <summary>More details</summary>
+        <div class="check">
+          <input id="fOpened" type="checkbox">
+          <label for="fOpened" style="margin:0">Opened</label>
+        </div>
+        <div class="field">
+          <label for="fLow">Low-stock threshold <span class="hint">blank = use the default</span></label>
+          <input id="fLow" type="number" min="0" step="1" placeholder="">
+        </div>
+        <div class="check">
+          <input id="fOnList" type="checkbox">
+          <label for="fOnList" style="margin:0">Always keep on the shopping list</label>
+        </div>
+        <div class="field">
+          <label for="fNotes">Notes</label>
+          <textarea id="fNotes" placeholder="Kids like this, bought at Costco, gluten-free"></textarea>
+        </div>
+        <p class="small muted" id="stockDateLabel"></p>
+      </details>
+    </div>
+    <div class="dlg-foot">
+      <button type="button" class="btn danger" id="btnDelete" hidden>Delete</button>
+      <button type="submit" class="btn primary" id="btnSave">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<!-- Connection settings. Gitignored; copy config.example.js if it is missing. -->
+<script src="config.js"></script>
+<script>
+/* ==========================================================================
+   Basement Food Inventory Tracker - version 0.1 - 0.4 of the build sequence
+   --------------------------------------------------------------------------
+   Plain JavaScript, no build step, no login. All data lives in this browser
+   (localStorage), so the app also works offline in the basement.
+
+   File map:
+     1. Configuration and defaults
+     2. Storage (load / save / seed)
+     3. Small helpers (dates, escaping, toast)
+     4. Rules engine (expiry status, low stock, duplicates)
+     5. Rendering (dashboard, inventory, expiring, shopping, settings)
+     6. Add / edit form
+     7. Events and start-up
+   ========================================================================== */
+
+
+/* ==========================================================================
+   1. CONFIGURATION AND DEFAULTS
+   ========================================================================== */
+
+const STORAGE_KEY = 'bfit.v1';           // bump this if the data shape changes
+
+const DEFAULT_SETTINGS = {
+  expiringSoonDays: 90,                  // "expiring soon" window (brief section 6)
+  defaultLowStock: 1,                    // qty <= 1 counts as low stock ("below 2")
+  categories: [
+    'Canned goods', 'Dry goods', 'Pasta/rice/grains', 'Baking', 'Snacks',
+    'Drinks', 'Condiments', 'Frozen meat', 'Frozen meals', 'Frozen other',
+    'Breakfast', 'Other'
+  ],
+  locations: ['Basement storage room', 'Basement freezer', 'Pantry'],
+  units: ['items', 'cans', 'boxes', 'bags', 'jars', 'bottles', 'kg', 'lbs', 'servings']
+};
+
+/* Words that carry no meaning when comparing two item names. */
+const STOPWORDS = new Set(['the', 'a', 'of', 'and', 'organic', 'brand', 'pack', 'size', 'large', 'small']);
+
+/* Household words that mean the same thing (brief section 11: name variations). */
+const SYNONYM_PHRASES = [
+  [/\bgarbanzo beans?\b/g, 'chickpeas'],
+  [/\bgarbanzos?\b/g, 'chickpeas'],      // also catches the word on its own, e.g. when searching
+  [/\bchick peas?\b/g, 'chickpeas'],
+  [/\bsoda water\b/g, 'sparkling water'],
+  [/\bicing sugar\b/g, 'powdered sugar'],
+  [/\bcoriander\b/g, 'cilantro'],
+  [/\bpassata\b/g, 'tomato sauce'],
+  [/\bmince\b/g, 'ground']
+];
+
+
+/* ==========================================================================
+   2. DATA LAYER - SUPABASE
+   --------------------------------------------------------------------------
+   Inventory items live in the Supabase `inventory` table and are reached
+   through its REST (PostgREST) endpoint with plain fetch. There is no npm
+   package here on purpose: the app is a single file with no build step, and
+   the official JS client would need a bundler or an ES module import, which
+   a double-clicked file:// page cannot do.
+
+   Two things stay in localStorage, and neither is inventory data:
+     - household preferences (categories, locations, expiry rules)
+     - a read-only cache of the last successful fetch, so the list still
+       displays in the basement when the Wi-Fi drops
+   ========================================================================== */
+
+/** In-memory working copy. `items` is a mirror of the Supabase table. */
+let state = { items: [], settings: { ...DEFAULT_SETTINGS } };
+
+/** Connection state, shown in the bar under the header. */
+let conn = { configured: false, online: true, lastError: '', fromCache: false };
+
+const cfg = (typeof window !== 'undefined' && window.APP_CONFIG) || {};
+const SUPABASE_URL = String(cfg.supabaseUrl || '').replace(/\/+$/, '');
+const SUPABASE_KEY = String(cfg.supabaseKey || '');
+const TABLE = cfg.table || 'inventory';
+
+/* ---------- localStorage: preferences + offline cache only ---------- */
+
+let storageWorks = true;
+
+function readLocal(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (e) {
+    storageWorks = false;
+    return fallback;
+  }
+}
+
+function writeLocal(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (e) {
+    if (storageWorks) { storageWorks = false; console.warn('Local storage is unavailable.', e); }
+  }
+}
+
+const saveSettings = () => writeLocal(STORAGE_KEY + '.settings', state.settings);
+const cacheItems   = () => writeLocal(STORAGE_KEY + '.cache', state.items);
+
+/* ---------- Field mapping: Postgres snake_case <-> app camelCase ---------- */
+
+function fromRow(row) {
+  return {
+    id: row.id,
+    name: row.name || '',
+    category: row.category || '',
+    location: row.location || '',
+    qty: Number(row.qty) || 0,
+    unit: row.unit || '',
+    expiry: row.expiry || '',                     // null in Postgres -> '' in the app
+    stockDate: row.stock_date || '',
+    opened: !!row.opened,
+    lowStock: row.low_stock === null || row.low_stock === undefined ? null : Number(row.low_stock),
+    onList: !!row.on_list,
+    notes: row.notes || '',
+    updatedAt: row.updated_at || ''
+  };
+}
+
+function toRow(item) {
+  return {
+    name: item.name,
+    category: item.category,
+    location: item.location,
+    qty: Number(item.qty) || 0,
+    unit: item.unit || null,
+    expiry: item.expiry || null,                  // '' in the app -> NULL in Postgres
+    stock_date: item.stockDate || todayISO(),
+    opened: !!item.opened,
+    low_stock: item.lowStock === null || item.lowStock === undefined ? null : Number(item.lowStock),
+    on_list: !!item.onList,
+    notes: item.notes || null
+  };
+}
+
+/* ---------- REST helpers ---------- */
+
+function restHeaders(extra) {
+  return {
+    apikey: SUPABASE_KEY,
+    Authorization: 'Bearer ' + SUPABASE_KEY,
+    'Content-Type': 'application/json',
+    ...extra
+  };
+}
+
+/**
+ * One place for every Supabase call, so error handling and the connection
+ * banner are consistent. Throws on failure; callers decide what to undo.
+ */
+async function rest(path, options = {}) {
+  if (!conn.configured) throw new Error('Supabase is not configured.');
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${TABLE}${path}`, {
+    ...options,
+    headers: restHeaders(options.headers)
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    let message = text;
+    try { message = JSON.parse(text).message || text; } catch (e) { /* keep raw text */ }
+    throw new Error(message || `Request failed (${res.status})`);
+  }
+  return text ? JSON.parse(text) : null;
+}
+
+/** Read the whole table. Small tables only - see the note in loadItems(). */
+async function apiList() {
+  const rows = await rest('?select=*&order=name.asc');
+  return (rows || []).map(fromRow);
+}
+
+async function apiInsert(item) {
+  const rows = await rest('', {
+    method: 'POST',
+    headers: { Prefer: 'return=representation' },
+    body: JSON.stringify(toRow(item))
+  });
+  return fromRow(rows[0]);
+}
+
+async function apiInsertMany(items) {
+  const rows = await rest('', {
+    method: 'POST',
+    headers: { Prefer: 'return=representation' },
+    body: JSON.stringify(items.map(toRow))
+  });
+  return (rows || []).map(fromRow);
+}
+
+async function apiUpdate(id, item) {
+  const rows = await rest(`?id=eq.${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { Prefer: 'return=representation' },
+    body: JSON.stringify(toRow(item))
+  });
+  return rows && rows[0] ? fromRow(rows[0]) : null;
+}
+
+async function apiDelete(id) {
+  await rest(`?id=eq.${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+/* ---------- Loading ---------- */
+
+/**
+ * Pull the inventory from Supabase.
+ *
+ * The whole table is loaded and then searched/filtered in memory rather than
+ * querying per keystroke. That is deliberate: the duplicate and synonym
+ * matching ("garbanzo beans" = "chickpeas") needs every row to compare
+ * against, and a household inventory is a few hundred rows at most. If this
+ * ever grows past a few thousand, move the text search to a server-side
+ * `ilike` filter and keep duplicate detection on a smaller candidate set.
+ */
+async function loadItems({ quiet = false } = {}) {
+  if (!conn.configured) { renderConnBar(); return; }
+  try {
+    state.items = await apiList();
+    conn.online = true;
+    conn.fromCache = false;
+    conn.lastError = '';
+    cacheItems();                       // keep a copy for offline viewing
+  } catch (err) {
+    conn.online = false;
+    conn.lastError = err.message;
+    const cached = readLocal(STORAGE_KEY + '.cache', null);
+    if (cached && !state.items.length) { state.items = cached; conn.fromCache = true; }
+    if (!quiet) console.warn('Could not reach Supabase:', err.message);
+  }
+  renderConnBar();
+}
+
+/** Load household preferences (local) and then the inventory (cloud). */
+async function load() {
+  state.settings = { ...DEFAULT_SETTINGS, ...readLocal(STORAGE_KEY + '.settings', {}) };
+  conn.configured = Boolean(
+    SUPABASE_URL && SUPABASE_KEY &&
+    !SUPABASE_URL.includes('YOUR-PROJECT-REF') &&
+    !SUPABASE_KEY.includes('YOUR-PUBLISHABLE-KEY')
+  );
+  await loadItems();
+}
+
+/* ---------- Connection banner ---------- */
+
+function renderConnBar() {
+  const bar = $('#connBar');
+  if (!bar) return;
+  let html = '', error = false;
+
+  if (!conn.configured) {
+    error = true;
+    html = 'Supabase is not configured. Copy <strong>config.example.js</strong> to <strong>config.js</strong> and add your project URL and key.';
+  } else if (!conn.online) {
+    error = true;
+    html = `Cannot reach Supabase - ${esc(conn.lastError)}. ` +
+           (conn.fromCache || state.items.length ? 'Showing the last saved copy; changes will not be saved.' : '') +
+           '<button type="button" data-act="retry">Retry</button>';
+  } else if (!state.items.length) {
+    html = 'Connected to Supabase, but the inventory is empty. Add an item, or load the sample data from Settings.';
+  }
+
+  bar.hidden = !html;
+  bar.className = error ? 'is-error' : '';
+  bar.innerHTML = html;
+}
+
+/** Sample data (brief section 14) plus a few rows that exercise every rule. */
+function sampleItems() {
+  const t = todayISO();
+  const rel = (days) => isoAddDays(t, days);   // date relative to today
+  const rows = [
+    // name, category, qty, unit, location, expiry, extras
+    ['Canned tomatoes',    'Canned goods',      4, 'cans',     'Basement storage room', '2027-03-15', {}],
+    ['Pasta',              'Dry goods',         3, 'boxes',    'Basement storage room', '2028-01-01', {}],
+    ['Chicken soup',       'Canned goods',      2, 'cans',     'Pantry',                '2026-09-30', {}],
+    ['Frozen berries',     'Frozen other',      1, 'bags',     'Basement freezer',      '2026-12-01', {}],
+    // Duplicate demo: same thing, different wording and location.
+    ['Tomatoes, canned',   'Canned goods',      6, 'cans',     'Pantry',                rel(400),     {}],
+    // Name-variation demo: these two are the same food.
+    ['Chickpeas',          'Canned goods',      3, 'cans',     'Basement storage room', rel(300),     {}],
+    ['Garbanzo beans',     'Canned goods',      2, 'cans',     'Pantry',                rel(210),     {}],
+    // Same item, different package size (brief section 11).
+    ['White rice 1 kg',    'Pasta/rice/grains', 2, 'bags',     'Basement storage room', rel(500),     {}],
+    ['White rice 5 kg',    'Pasta/rice/grains', 1, 'bags',     'Basement storage room', rel(500),     { notes: 'Costco bag' }],
+    // Already expired.
+    ['Coconut milk',       'Canned goods',      2, 'cans',     'Basement storage room', rel(-21),     {}],
+    ['Frozen lasagna',     'Frozen meals',      1, 'items',    'Basement freezer',      rel(-4),      {}],
+    // Expiring inside the 90-day window.
+    ['Ground beef',        'Frozen meat',       3, 'kg',       'Basement freezer',      rel(18),      {}],
+    ['Granola bars',       'Snacks',            2, 'boxes',    'Basement storage room', rel(47),      { notes: 'Kids like these' }],
+    ['Apple juice',        'Drinks',            6, 'bottles',  'Basement storage room', rel(75),      {}],
+    // Low stock -> lands on the shopping list.
+    ['Olive oil',          'Condiments',        1, 'bottles',  'Pantry',                rel(320),     { lowStock: 2 }],
+    ['Peanut butter',      'Condiments',        0, 'jars',     'Pantry',                rel(260),     {}],
+    // No expiry date on the package -> flagged for review, blank allowed.
+    ['Baking soda',        'Baking',            1, 'boxes',    'Basement storage room', '',           {}],
+    ['Rolled oats',        'Breakfast',         2, 'bags',     'Basement storage room', '',           { opened: true }]
+  ];
+  // No id here - Supabase assigns the uuid on insert.
+  return rows.map(([name, category, qty, unit, location, expiry, extra], i) => ({
+    name, category, qty, unit, location, expiry,
+    stockDate: isoAddDays(t, -(rows.length - i)),  // staggered so "recently added" looks real
+    opened: extra.opened || false,
+    lowStock: extra.lowStock ?? null,              // null = use the default threshold
+    onList: false,
+    notes: extra.notes || ''
+  }));
+}
+
+
+/* ==========================================================================
+   3. SMALL HELPERS
+   ========================================================================== */
+
+const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+/** Escape anything typed by a person before putting it into innerHTML. */
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/** Today as YYYY-MM-DD in local time (not UTC - avoids off-by-one-day bugs). */
+function todayISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function isoAddDays(iso, days) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(y, m - 1, d + days);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+}
+
+/** Whole days from today until an ISO date. Negative = in the past. */
+function daysUntil(iso) {
+  if (!iso) return null;
+  const [y, m, d] = iso.split('-').map(Number);
+  const target = new Date(y, m - 1, d);
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((target - start) / 86400000);
+}
+
+function formatDate(iso) {
+  if (!iso) return 'no date';
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+/** Short, friendly description of how long is left. */
+function expiryPhrase(days) {
+  if (days === null) return '';
+  if (days < 0) return `expired ${Math.abs(days)} day${Math.abs(days) === 1 ? '' : 's'} ago`;
+  if (days === 0) return 'expires today';
+  if (days === 1) return 'expires tomorrow';
+  return `${days} days left`;
+}
+
+let toastTimer;
+function toast(msg) {
+  const el = $('#toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
+}
+
+
+
+/* ==========================================================================
+   4. RULES ENGINE
+   The brief's section 6 rules live here, in one place, so they are easy to
+   change later.
+   ========================================================================== */
+
+/**
+ * Expiry status for one item.
+ *   'expired'  - expiry date is before today
+ *   'expiring' - expiry date is within the "expiring soon" window
+ *   'fresh'    - expiry date is further out than the window
+ *   'none'     - no expiry date recorded (allowed, but flagged for review)
+ */
+function expiryStatus(item) {
+  const days = daysUntil(item.expiry);
+  if (days === null) return 'none';
+  if (days < 0) return 'expired';
+  if (days <= state.settings.expiringSoonDays) return 'expiring';
+  return 'fresh';
+}
+
+/** Threshold for this item: its own value, or the household default. */
+function lowStockThreshold(item) {
+  return item.lowStock === null || item.lowStock === undefined
+    ? state.settings.defaultLowStock
+    : Number(item.lowStock);
+}
+
+/** Low stock rule: quantity is at or below the threshold. */
+function isLowStock(item) {
+  return Number(item.qty) <= lowStockThreshold(item);
+}
+
+/** Should this item be on the shopping list? */
+function isOnShoppingList(item) {
+  return item.onList === true || isLowStock(item);
+}
+
+/* ---------- Duplicate detection ---------- */
+
+/**
+ * Reduce a name to a comparable form: lower case, no punctuation, household
+ * synonyms applied, filler words dropped, plurals folded to singular.
+ * "Tomatoes, canned" and "Canned tomatoes" both become "canned tomato".
+ */
+function normalizeName(name) {
+  let s = String(name || '').toLowerCase();
+  for (const [pattern, replacement] of SYNONYM_PHRASES) s = s.replace(pattern, replacement);
+  s = s.replace(/[^a-z0-9\s]/g, ' ');
+  const tokens = s.split(/\s+/)
+    .filter(Boolean)
+    .filter((t) => !STOPWORDS.has(t))
+    .map(singularize);
+  return tokens.sort().join(' ');
+}
+
+function singularize(word) {
+  if (word.length <= 3) return word;
+  if (/ies$/.test(word)) return word.slice(0, -3) + 'y';
+  if (/(oes|ses|xes|zes|ches|shes)$/.test(word)) return word.slice(0, -2);
+  if (/s$/.test(word) && !/ss$/.test(word)) return word.slice(0, -1);
+  return word;
+}
+
+/** How alike two names are, 0 to 1, based on shared words. */
+function nameSimilarity(a, b) {
+  const A = new Set(normalizeName(a).split(' ').filter(Boolean));
+  const B = new Set(normalizeName(b).split(' ').filter(Boolean));
+  if (!A.size || !B.size) return 0;
+  let shared = 0;
+  A.forEach((t) => { if (B.has(t)) shared++; });
+  return shared / (A.size + B.size - shared);   // Jaccard similarity
+}
+
+const SIMILAR_ENOUGH = 0.6;
+
+/**
+ * Find existing items that look like the one being entered.
+ * Returns { exact, similar }:
+ *   exact   - same name + category + location (the brief's duplicate rule)
+ *   similar - same or very close name anywhere else in the inventory
+ * Both lists are sorted by earliest expiry first (the "use first" rule).
+ */
+function findDuplicates(candidate, ignoreId) {
+  const exact = [], similar = [];
+  for (const item of state.items) {
+    if (item.id === ignoreId) continue;
+    const sameName = normalizeName(item.name) === normalizeName(candidate.name);
+    if (sameName && item.category === candidate.category && item.location === candidate.location) {
+      exact.push(item);
+    } else if (sameName || nameSimilarity(item.name, candidate.name) >= SIMILAR_ENOUGH) {
+      similar.push(item);
+    }
+  }
+  return { exact: sortByExpiry(exact), similar: sortByExpiry(similar) };
+}
+
+/** Group the whole inventory into sets of items that look like each other. */
+function duplicateGroups() {
+  const groups = new Map();            // normalized name -> items
+  for (const item of state.items) {
+    const key = normalizeName(item.name);
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  // Merge groups whose names are merely similar (e.g. "white rice 1 kg" / "5 kg").
+  const keys = Array.from(groups.keys());
+  for (let i = 0; i < keys.length; i++) {
+    for (let j = i + 1; j < keys.length; j++) {
+      if (!groups.has(keys[i]) || !groups.has(keys[j])) continue;
+      if (nameSimilarity(keys[i], keys[j]) >= SIMILAR_ENOUGH) {
+        groups.get(keys[i]).push(...groups.get(keys[j]));
+        groups.delete(keys[j]);
+      }
+    }
+  }
+  return Array.from(groups.values())
+    .filter((g) => g.length > 1)
+    .map(sortByExpiry);              // use-first rule: earliest expiry at the top
+}
+
+/** Ids of every item that sits in a duplicate group (used by the filter). */
+function duplicateIds() {
+  const ids = new Set();
+  duplicateGroups().forEach((g) => g.forEach((i) => ids.add(i.id)));
+  return ids;
+}
+
+/** Sort helper: soonest expiry first, items with no date last. */
+function sortByExpiry(list) {
+  return [...list].sort((a, b) => {
+    if (!a.expiry && !b.expiry) return a.name.localeCompare(b.name);
+    if (!a.expiry) return 1;
+    if (!b.expiry) return -1;
+    return a.expiry.localeCompare(b.expiry);
+  });
+}
+
+
+/* ==========================================================================
+   5. RENDERING
+   ========================================================================== */
+
+/** One inventory row. Used by every list in the app so rows look the same. */
+function itemRow(item, opts = {}) {
+  const status = expiryStatus(item);
+  const days = daysUntil(item.expiry);
+  const low = isLowStock(item);
+  const strip = status === 'expired' ? 'expired' : (status === 'expiring' || low) ? 'expiring' : '';
+
+  const badges = [];
+  if (status === 'expired')  badges.push('<span class="badge expired">Expired</span>');
+  if (status === 'expiring') badges.push('<span class="badge expiring">Expiring soon</span>');
+  if (status === 'fresh' && opts.showFresh) badges.push('<span class="badge fresh">In date</span>');
+  if (status === 'none')     badges.push('<span class="badge review">No expiry date</span>');
+  if (low)                   badges.push(`<span class="badge low">${Number(item.qty) === 0 ? 'Out of stock' : 'Low stock'}</span>`);
+  if (item.opened)           badges.push('<span class="badge">Opened</span>');
+  if (opts.duplicate)        badges.push('<span class="badge dup">Possible duplicate</span>');
+
+  const dateLine = item.expiry
+    ? `${formatDate(item.expiry)} &middot; ${expiryPhrase(days)}`
+    : 'No expiry date';
+
+  return `
+    <li class="item row-strip ${strip}">
+      <div class="qty">${esc(item.qty)}<small>${esc(item.unit || '')}</small></div>
+      <div class="body">
+        <div class="name">${esc(item.name)}</div>
+        <div class="meta">${esc(item.category)} &middot; ${esc(item.location)}</div>
+        <div class="meta">${dateLine}</div>
+        ${item.notes ? `<div class="meta">&ldquo;${esc(item.notes)}&rdquo;</div>` : ''}
+        ${badges.length ? `<div class="badges">${badges.join('')}</div>` : ''}
+      </div>
+      <div class="actions">
+        <div class="qtybtns">
+          <button class="btn sm" data-act="dec" data-id="${item.id}" aria-label="Use one ${esc(item.name)}">&minus;</button>
+          <button class="btn sm" data-act="inc" data-id="${item.id}" aria-label="Add one ${esc(item.name)}">+</button>
+        </div>
+        <button class="btn sm" data-act="edit" data-id="${item.id}">Edit</button>
+      </div>
+    </li>`;
+}
+
+function renderList(el, items, emptyMsg, opts = {}) {
+  el.innerHTML = items.length
+    ? items.map((i) => itemRow(i, opts)).join('')
+    : `<li class="empty">${esc(emptyMsg)}</li>`;
+}
+
+/* ---------- Home dashboard ---------- */
+
+function renderDashboard() {
+  const items = state.items;
+  const expired  = items.filter((i) => expiryStatus(i) === 'expired');
+  const expiring = items.filter((i) => expiryStatus(i) === 'expiring');
+  const noDate   = items.filter((i) => expiryStatus(i) === 'none');
+  const low      = items.filter(isLowStock);
+  const groups   = duplicateGroups();
+  const units    = items.reduce((sum, i) => sum + (Number(i.qty) || 0), 0);
+
+  // Key numbers. Each tile jumps to the matching filtered list.
+  const tiles = [
+    { n: items.length, l: `items (${Math.round(units * 10) / 10} units total)`, cls: '', view: 'inventory', filter: 'all' },
+    { n: expired.length,  l: 'expired',            cls: 'is-danger', view: 'expiring', filter: 'expired' },
+    { n: expiring.length, l: 'expiring soon',      cls: 'is-warn',   view: 'expiring', filter: 'expiring' },
+    { n: low.length,      l: 'low stock',          cls: 'is-warn',   view: 'shopping', filter: 'low' },
+    { n: groups.length,   l: 'duplicate candidates', cls: 'is-info', view: 'inventory', filter: 'dup' },
+    { n: noDate.length,   l: 'missing expiry date',  cls: 'is-info', view: 'inventory', filter: 'none' }
+  ];
+  $('#statTiles').innerHTML = tiles.map((t) => `
+    <button class="stat ${t.cls}" data-act="goto" data-view="${t.view}" data-filter="${t.filter}">
+      <div class="n">${t.n}</div><div class="l">${esc(t.l)}</div>
+    </button>`).join('');
+
+  // Use first: soonest to expire, expired items included.
+  const useFirst = sortByExpiry(items.filter((i) => ['expired', 'expiring'].includes(expiryStatus(i)))).slice(0, 5);
+  renderList($('#listUseFirst'), useFirst, 'Nothing needs using up right now.');
+
+  // Duplicate groups, each sorted so the item to use first is at the top.
+  $('#listDuplicates').innerHTML = groups.length
+    ? groups.map((g) => `
+        <div style="margin-bottom:10px">
+          <div class="section-head"><h3>${esc(g[0].name)}</h3>
+            <span class="badge dup">${g.length} entries</span></div>
+          <ul class="list">${g.map((i) => itemRow(i, { duplicate: true })).join('')}</ul>
+        </div>`).join('')
+    : '<p class="empty">No likely duplicates.</p>';
+
+  renderList($('#listNoExpiry'), noDate, 'Every item has an expiry date.');
+
+  const recent = [...items].sort((a, b) => String(b.stockDate).localeCompare(String(a.stockDate))).slice(0, 5);
+  renderList($('#listRecent'), recent, 'No items yet.');
+
+  // Small red pip on the Expiring tab.
+  const pip = $('#pipExpiring');
+  const urgent = expired.length + expiring.length;
+  pip.hidden = urgent === 0;
+  pip.textContent = urgent > 99 ? '99+' : urgent;
+}
+
+/* ---------- Inventory list ---------- */
+
+function renderInventory() {
+  const q = $('#q').value.trim().toLowerCase();
+  const cat = $('#fCategory').value;
+  const loc = $('#fLocation').value;
+  const status = $('#fStatus').value;
+  const sort = $('#fSort').value;
+  const dupes = status === 'dup' ? duplicateIds() : null;
+
+  let list = state.items.filter((i) => {
+    if (q) {
+      const haystack = `${i.name} ${i.category} ${i.location} ${i.notes || ''}`.toLowerCase();
+      // Match either the raw text or the normalized name, so "garbanzo"
+      // still finds "chickpeas".
+      if (!haystack.includes(q) && !normalizeName(i.name).includes(normalizeName(q))) return false;
+    }
+    if (cat !== 'all' && i.category !== cat) return false;
+    if (loc !== 'all' && i.location !== loc) return false;
+    switch (status) {
+      case 'expired':  return expiryStatus(i) === 'expired';
+      case 'expiring': return expiryStatus(i) === 'expiring';
+      case 'fresh':    return expiryStatus(i) === 'fresh';
+      case 'none':     return expiryStatus(i) === 'none';
+      case 'low':      return isLowStock(i);
+      case 'opened':   return !!i.opened;
+      case 'dup':      return dupes.has(i.id);
+      default:         return true;
+    }
+  });
+
+  if (sort === 'name')       list.sort((a, b) => a.name.localeCompare(b.name));
+  else if (sort === 'qty')   list.sort((a, b) => Number(a.qty) - Number(b.qty));
+  else if (sort === 'added') list.sort((a, b) => String(b.stockDate).localeCompare(String(a.stockDate)));
+  else                       list = sortByExpiry(list);
+
+  $('#invCount').textContent = `${list.length} of ${state.items.length} items`;
+  renderList($('#listInventory'), list, 'No items match. Try clearing the filters.', { showFresh: true });
+}
+
+/* ---------- Expiring soon (expired first, then 0-30 / 31-60 / 61-90) ---------- */
+
+function renderExpiring() {
+  const win = state.settings.expiringSoonDays;
+  const buckets = [
+    { title: 'Expired - remove or discard', test: (d) => d < 0, empty: 'Nothing has expired.' },
+    { title: 'Next 30 days',  test: (d) => d >= 0 && d <= 30, empty: 'Nothing expiring in 30 days.' },
+    { title: '31 to 60 days', test: (d) => d > 30 && d <= 60, empty: 'Nothing in this window.' },
+    { title: '61 to 90 days', test: (d) => d > 60 && d <= 90, empty: 'Nothing in this window.' }
+  ];
+  // If the household changes the window, show one extra bucket for the rest of it.
+  if (win > 90) buckets.push({ title: `91 to ${win} days`, test: (d) => d > 90 && d <= win, empty: 'Nothing in this window.' });
+
+  $('#expiringGroups').innerHTML = buckets.map((b) => {
+    const rows = sortByExpiry(state.items.filter((i) => {
+      const d = daysUntil(i.expiry);
+      return d !== null && b.test(d);
+    }));
+    return `
+      <div class="card">
+        <div class="section-head"><h2>${esc(b.title)}</h2><span class="badge">${rows.length}</span></div>
+        <ul class="list">${rows.length ? rows.map((i) => itemRow(i)).join('') : `<li class="empty">${esc(b.empty)}</li>`}</ul>
+      </div>`;
+  }).join('') + `
+      <div class="card">
+        <div class="section-head"><h2>No expiry date - please review</h2></div>
+        <ul class="list" id="listExpNoDate"></ul>
+      </div>`;
+
+  renderList($('#listExpNoDate'), state.items.filter((i) => !i.expiry), 'Every item has a date.');
+}
+
+/* ---------- Shopping list ---------- */
+
+function renderShopping() {
+  const buy = state.items.filter(isOnShoppingList)
+    .sort((a, b) => Number(a.qty) - Number(b.qty) || a.name.localeCompare(b.name));
+  renderList($('#listBuy'), buy, 'Nothing is low. Nothing to buy.');
+
+  // "Do not buy": comfortably in stock, so do not pick more up at the store.
+  const q = $('#qShop').value.trim().toLowerCase();
+  const avoid = state.items
+    .filter((i) => !isOnShoppingList(i) && expiryStatus(i) !== 'expired')
+    .filter((i) => !q || `${i.name} ${i.category}`.toLowerCase().includes(q)
+                      || normalizeName(i.name).includes(normalizeName(q)))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  renderList($('#listAvoid'), avoid, q ? 'Not in stock - safe to buy.' : 'Nothing in stock.');
+}
+
+/* ---------- Settings ---------- */
+
+function renderSettings() {
+  $('#setExpiryDays').value = state.settings.expiringSoonDays;
+  $('#setLowStock').value = state.settings.defaultLowStock;
+  $('#chipCategories').innerHTML = listEditor(state.settings.categories, 'category');
+  $('#chipLocations').innerHTML = listEditor(state.settings.locations, 'location');
+}
+
+/** Rows of category/location names with a remove button on each. */
+function listEditor(values, kind) {
+  return values.map((v) => `
+    <div class="item">
+      <div class="body"><div class="name">${esc(v)}</div>
+        <div class="meta">${countUsing(kind, v)} item(s) using this</div></div>
+      <div class="actions">
+        <button class="btn sm danger" data-act="remove-${kind}" data-value="${esc(v)}">Remove</button>
+      </div>
+    </div>`).join('');
+}
+
+function countUsing(kind, value) {
+  const field = kind === 'category' ? 'category' : 'location';
+  return state.items.filter((i) => i[field] === value).length;
+}
+
+/* ---------- Redraw everything ---------- */
+
+function render() {
+  renderDashboard();
+  renderInventory();
+  renderExpiring();
+  renderShopping();
+  renderSettings();
+}
+
+
+/* ==========================================================================
+   6. ADD / EDIT FORM
+   ========================================================================== */
+
+let editingId = null;   // null = adding a new item
+
+/** Fill a <select> with options, keeping the current value if still valid. */
+function fillSelect(el, values, { allLabel = null, selected = null } = {}) {
+  const opts = allLabel ? [`<option value="all">${esc(allLabel)}</option>`] : [];
+  values.forEach((v) => opts.push(`<option value="${esc(v)}">${esc(v)}</option>`));
+  el.innerHTML = opts.join('');
+  if (selected !== null) el.value = selected;
+}
+
+function refreshDropdowns() {
+  const { categories, locations, units } = state.settings;
+  // Filters keep their selection where possible.
+  const keep = { c: $('#fCategory').value, l: $('#fLocation').value };
+  fillSelect($('#fCategory'), categories, { allLabel: 'All categories' });
+  fillSelect($('#fLocation'), locations, { allLabel: 'All locations' });
+  if (categories.includes(keep.c) || keep.c === 'all') $('#fCategory').value = keep.c;
+  if (locations.includes(keep.l) || keep.l === 'all') $('#fLocation').value = keep.l;
+  fillSelect($('#fCat'), categories);
+  fillSelect($('#fLoc'), locations);
+  fillSelect($('#fUnit'), units);
+}
+
+function openForm(item) {
+  editingId = item ? item.id : null;
+  refreshDropdowns();
+
+  $('#dlgTitle').textContent = item ? 'Edit item' : 'Add item';
+  $('#fName').value   = item ? item.name : '';
+  $('#fCat').value    = item ? item.category : state.settings.categories[0];
+  $('#fLoc').value    = item ? item.location : state.settings.locations[0];
+  $('#fQty').value    = item ? item.qty : 1;
+  $('#fUnit').value   = item ? (item.unit || 'items') : 'items';
+  $('#fExpiry').value = item ? (item.expiry || '') : '';
+  $('#fOpened').checked = item ? !!item.opened : false;
+  $('#fLow').value    = item && item.lowStock !== null && item.lowStock !== undefined ? item.lowStock : '';
+  $('#fOnList').checked = item ? !!item.onList : false;
+  $('#fNotes').value  = item ? (item.notes || '') : '';
+  $('#stockDateLabel').textContent = item
+    ? `Stocked on ${formatDate(item.stockDate)}`
+    : `Stock date will be set to today (${formatDate(todayISO())}).`;
+
+  $('#btnDelete').hidden = !item;
+  $('#errName').hidden = true;
+  $('#dupWarn').innerHTML = '';
+  $('#itemDialog').showModal();
+  if (!item) setTimeout(() => $('#fName').focus(), 50);
+  checkDuplicatesInForm();
+}
+
+/** Live duplicate warning while the form is open (brief section 6). */
+function checkDuplicatesInForm() {
+  const candidate = {
+    name: $('#fName').value.trim(),
+    category: $('#fCat').value,
+    location: $('#fLoc').value
+  };
+  const box = $('#dupWarn');
+  if (candidate.name.length < 2) { box.innerHTML = ''; return; }
+
+  const { exact, similar } = findDuplicates(candidate, editingId);
+  if (!exact.length && !similar.length) { box.innerHTML = ''; return; }
+
+  const line = (i) => `<li><strong>${esc(i.name)}</strong> &ndash; ${esc(i.qty)} ${esc(i.unit || '')} in
+      ${esc(i.location)} &middot; ${i.expiry ? esc(expiryPhrase(daysUntil(i.expiry))) : 'no expiry date'}</li>`;
+
+  box.innerHTML = `
+    <div class="dup-warn">
+      <h3>You may already have this</h3>
+      ${exact.length ? `<p class="small">Same name, category and location:</p><ul>${exact.map(line).join('')}</ul>` : ''}
+      ${similar.length ? `<p class="small">Similar items elsewhere:</p><ul>${similar.map(line).join('')}</ul>` : ''}
+      ${exact.length ? `<button type="button" class="btn sm" data-act="merge" data-id="${exact[0].id}">Add to the existing entry instead</button>` : ''}
+    </div>`;
+}
+
+function saveForm(event) {
+  event.preventDefault();
+  const name = $('#fName').value.trim();
+  if (!name) { $('#errName').hidden = false; $('#fName').focus(); return; }
+
+  const qty = Number($('#fQty').value);
+  const lowRaw = $('#fLow').value.trim();
+  const data = {
+    name,
+    category: $('#fCat').value,
+    location: $('#fLoc').value,
+    qty: Number.isFinite(qty) && qty >= 0 ? qty : 0,
+    unit: $('#fUnit').value,
+    expiry: $('#fExpiry').value || '',
+    opened: $('#fOpened').checked,
+    lowStock: lowRaw === '' ? null : Number(lowRaw),
+    onList: $('#fOnList').checked,
+    notes: $('#fNotes').value.trim()
+  };
+
+  const form = $('#itemForm');
+  form.classList.add('busy');                       // block double submits while saving
+
+  const finish = () => { form.classList.remove('busy'); render(); };
+
+  if (editingId) {
+    const item = state.items.find((i) => i.id === editingId);
+    const before = { ...item };                     // kept so we can undo on failure
+    Object.assign(item, data);
+    apiUpdate(editingId, item)
+      .then((saved) => { if (saved) Object.assign(item, saved); cacheItems(); toast('Item updated'); })
+      .catch((err) => { Object.assign(item, before); failed('Could not save the change', err); })
+      .finally(finish);
+  } else {
+    // Stock date is set automatically on the day the item is entered.
+    const draft = { stockDate: todayISO(), ...data };
+    apiInsert(draft)
+      .then((saved) => {
+        state.items.push(saved);
+        cacheItems();
+        toast(data.expiry ? 'Item added' : 'Added - remember to check the expiry date');
+      })
+      .catch((err) => failed('Could not add the item', err))
+      .finally(finish);
+  }
+  $('#itemDialog').close();
+}
+
+/** Shared failure path: tell the user, flag the connection, redraw. */
+function failed(what, err) {
+  console.error(what, err);
+  conn.online = false;
+  conn.lastError = err.message;
+  renderConnBar();
+  toast(`${what} - not saved`);
+}
+
+async function deleteItem(id, { confirmFirst = true } = {}) {
+  const item = state.items.find((i) => i.id === id);
+  if (!item) return;
+  if (confirmFirst && !confirm(`Delete "${item.name}"? This removes it for everyone and cannot be undone.`)) return;
+
+  const before = state.items;
+  state.items = state.items.filter((i) => i.id !== id);   // optimistic
+  render();
+  try {
+    await apiDelete(id);
+    cacheItems();
+    toast('Item deleted');
+  } catch (err) {
+    state.items = before;                                 // put it back
+    failed('Could not delete the item', err);
+    render();
+  }
+}
+
+/**
+ * Change quantity by a step, never below zero.
+ * Updated on screen first so the +/- buttons stay instant, then written to
+ * Supabase; the change is rolled back if the write fails.
+ */
+async function adjustQty(id, step) {
+  const item = state.items.find((i) => i.id === id);
+  if (!item) return;
+  const before = item.qty;
+  item.qty = Math.max(0, Math.round((Number(item.qty) + step) * 100) / 100);
+  render();
+  try {
+    await apiUpdate(id, item);
+    cacheItems();
+  } catch (err) {
+    item.qty = before;
+    failed('Could not update the quantity', err);
+    render();
+  }
+}
+
+
+/* ==========================================================================
+   7. EVENTS AND START-UP
+   ========================================================================== */
+
+function showView(name) {
+  $$('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + name));
+  $$('.tabs button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.view === name)));
+  window.scrollTo({ top: 0 });
+}
+
+function wireEvents() {
+  // Tabs
+  $$('.tabs button').forEach((b) => b.addEventListener('click', () => showView(b.dataset.view)));
+
+  // Add button + form
+  $('#btnAdd').addEventListener('click', () => openForm(null));
+  $('#itemForm').addEventListener('submit', saveForm);
+  $('#btnCancel').addEventListener('click', () => $('#itemDialog').close());
+  $('#btnDelete').addEventListener('click', () => {
+    const id = editingId;
+    $('#itemDialog').close();
+    deleteItem(id);
+  });
+  ['#fName', '#fCat', '#fLoc'].forEach((sel) =>
+    $(sel).addEventListener('input', checkDuplicatesInForm));
+
+  // Filters
+  ['#q', '#fCategory', '#fLocation', '#fStatus', '#fSort'].forEach((sel) =>
+    $(sel).addEventListener('input', renderInventory));
+  $('#qShop').addEventListener('input', renderShopping);
+
+  // One delegated handler for every row button in every list.
+  document.body.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-act]');
+    if (!btn) return;
+    const { act, id } = btn.dataset;
+
+    if (act === 'edit') openForm(state.items.find((i) => i.id === id));
+    else if (act === 'inc') adjustQty(id, 1);
+    else if (act === 'dec') adjustQty(id, -1);
+    else if (act === 'goto') {
+      showView(btn.dataset.view);
+      if (btn.dataset.view === 'inventory') {
+        $('#fStatus').value = btn.dataset.filter;
+        $('#q').value = '';
+        renderInventory();
+      }
+    } else if (act === 'merge') {
+      // Duplicate warning: add one to the item that already exists instead.
+      adjustQty(id, Number($('#fQty').value) || 1);
+      $('#itemDialog').close();
+      toast('Added to the existing entry');
+    } else if (act === 'remove-category' || act === 'remove-location') {
+      removeSetting(act === 'remove-category' ? 'categories' : 'locations', btn.dataset.value);
+    } else if (act === 'retry') {
+      refreshFromCloud();
+    }
+  });
+
+  // Pull other people's changes when the inventory or shopping views open.
+  $$('.tabs button').forEach((b) => b.addEventListener('click', () => {
+    if (['inventory', 'shopping', 'dashboard'].includes(b.dataset.view)) loadItems({ quiet: true }).then(render);
+  }));
+  $('#btnRefresh').addEventListener('click', refreshFromCloud);
+
+  // Settings - household preferences stay on this device (see note in Settings).
+  $('#btnSaveRules').addEventListener('click', () => {
+    const days = Number($('#setExpiryDays').value);
+    const low = Number($('#setLowStock').value);
+    state.settings.expiringSoonDays = Number.isFinite(days) && days > 0 ? days : 90;
+    state.settings.defaultLowStock = Number.isFinite(low) && low >= 0 ? low : 1;
+    saveSettings(); render(); toast('Rules saved');
+  });
+  $('#btnAddCategory').addEventListener('click', () => addSetting('categories', '#newCategory'));
+  $('#btnAddLocation').addEventListener('click', () => addSetting('locations', '#newLocation'));
+
+  // Data
+  $('#btnExport').addEventListener('click', exportSnapshot);
+  $('#btnImport').addEventListener('click', () => $('#fileImport').click());
+  $('#fileImport').addEventListener('change', importItems);
+  $('#btnSeed').addEventListener('click', seedSampleData);
+
+  // Copy the shopping list as plain text.
+  $('#btnCopyList').addEventListener('click', async () => {
+    const lines = state.items.filter(isOnShoppingList)
+      .map((i) => `- ${i.name} (have ${i.qty} ${i.unit || ''})`.trim());
+    if (!lines.length) { toast('Nothing to copy'); return; }
+    try {
+      await navigator.clipboard.writeText('Shopping list\n' + lines.join('\n'));
+      toast('Shopping list copied');
+    } catch { toast('Copy is not available in this browser'); }
+  });
+}
+
+function addSetting(key, inputSel) {
+  const input = $(inputSel);
+  const value = input.value.trim();
+  if (!value) return;
+  if (state.settings[key].some((v) => v.toLowerCase() === value.toLowerCase())) { toast('Already on the list'); return; }
+  state.settings[key].push(value);
+  input.value = '';
+  saveSettings(); refreshDropdowns(); render(); toast('Added');
+}
+
+function removeSetting(key, value) {
+  const label = key === 'categories' ? 'category' : 'location';
+  if (countUsing(label, value) > 0) { toast('Still used by some items'); return; }
+  if (state.settings[key].length <= 1) { toast('Keep at least one'); return; }
+  state.settings[key] = state.settings[key].filter((v) => v !== value);
+  saveSettings(); refreshDropdowns(); render(); toast('Removed');
+}
+
+/** Re-read the table, so edits made on another phone or laptop show up. */
+async function refreshFromCloud() {
+  $('#btnRefresh').classList.add('busy');
+  await loadItems();
+  render();
+  $('#btnRefresh').classList.remove('busy');
+  if (conn.online) toast('Up to date');
+}
+
+/* ---------- Data buttons ---------- */
+
+/** Point-in-time copy of the cloud data. Supabase itself holds the real data. */
+function exportSnapshot() {
+  const blob = new Blob([JSON.stringify({ items: state.items, settings: state.settings }, null, 2)],
+    { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `food-inventory-${todayISO()}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast('Snapshot downloaded');
+}
+
+/** Add the items from a snapshot file to Supabase (does not replace what is there). */
+function importItems(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      const parsed = JSON.parse(reader.result);
+      if (!Array.isArray(parsed.items) || !parsed.items.length) throw new Error('No items in that file');
+      if (!confirm(`Add ${parsed.items.length} item(s) from this file to Supabase?`)) return;
+      if (parsed.settings) { state.settings = { ...DEFAULT_SETTINGS, ...parsed.settings }; saveSettings(); }
+      const saved = await apiInsertMany(parsed.items);
+      state.items.push(...saved);
+      cacheItems(); refreshDropdowns(); render();
+      toast(`${saved.length} item(s) imported`);
+    } catch (err) {
+      alert('That file could not be imported: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+  e.target.value = '';
+}
+
+/** Write the sample rows to Supabase. Only ever on an explicit tap. */
+async function seedSampleData() {
+  const rows = sampleItems();
+  if (!confirm(`Add ${rows.length} sample items to your Supabase table?`)) return;
+  try {
+    const saved = await apiInsertMany(rows);
+    state.items.push(...saved);
+    cacheItems(); render();
+    toast('Sample data loaded');
+  } catch (err) {
+    failed('Could not load the sample data', err);
+  }
+}
+
+async function init() {
+  $('#todayLabel').textContent = formatDate(todayISO());
+  wireEvents();
+  await load();                 // preferences from this device, items from Supabase
+  refreshDropdowns();
+  render();
+  $('#dataStatus').textContent = conn.configured
+    ? `Items are stored in Supabase (table "${TABLE}"). Categories, locations and rules are kept on this device only.`
+    : 'Not connected to Supabase - see the message at the top of the app.';
+  if (!storageWorks) toast('This browser blocks local storage, so preferences will not stick');
+}
+
+init();
+</script>
+</body>
+</html>

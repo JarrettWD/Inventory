@@ -1,0 +1,19 @@
+# Local secrets / connection settings - never commit these
+.env
+.env.*
+!.env.example
+config.js
+
+# Exported backups may contain household data
+food-inventory-*.json
+
+# OS / editor noise
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+
+# Dependencies, if a build step is ever added
+node_modules/
+dist/
