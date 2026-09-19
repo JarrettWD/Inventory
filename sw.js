@@ -15,7 +15,7 @@
    already installed an older copy pick the new one up.
    ========================================================================== */
 
-const CACHE_VERSION = 'v1';
+const CACHE_VERSION = 'v2';   // v2: new teal icons + theme colours
 const CACHE_NAME = `food-inventory-shell-${CACHE_VERSION}`;
 
 /* Files the app needs to start. Relative paths so it works from a subfolder

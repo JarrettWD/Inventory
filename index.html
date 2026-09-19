@@ -10,8 +10,9 @@
 <!-- Installable web app (PWA). Needs to be served over HTTPS or localhost;
      none of this activates when the file is opened directly from disk. -->
 <link rel="manifest" href="manifest.json">
-<meta name="theme-color" content="#1f6feb" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#12151a" media="(prefers-color-scheme: dark)">
+<!-- Matches theme_color in manifest.json, so the status bar is the same teal
+     as the icon in both light and dark mode. -->
+<meta name="theme-color" content="#11695E">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="application-name" content="Food Stock">
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
