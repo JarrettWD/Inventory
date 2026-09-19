@@ -408,7 +408,7 @@ details.optional summary{
         <input id="setExpiryDays" type="number" min="1" max="365" step="1">
       </div>
       <div class="field">
-        <label for="setLowStock">Default low-stock threshold <span class="hint">add to shopping list when quantity is at or below this</span></label>
+        <label for="setLowStock">Default low-stock threshold <span class="hint">for items being watched, add to the shopping list when quantity is at or below this</span></label>
         <input id="setLowStock" type="number" min="0" max="99" step="1">
       </div>
       <button class="btn primary wide" id="btnSaveRules">Save rules</button>
@@ -509,9 +509,18 @@ details.optional summary{
           <input id="fOpened" type="checkbox">
           <label for="fOpened" style="margin:0">Opened</label>
         </div>
-        <div class="field">
-          <label for="fLow">Low-stock threshold <span class="hint">blank = use the default</span></label>
-          <input id="fLow" type="number" min="0" step="1" placeholder="">
+        <div class="check">
+          <input id="fLowEnabled" type="checkbox">
+          <label for="fLowEnabled" style="margin:0">Watch this item for low stock</label>
+        </div>
+        <p class="small muted" id="lowEnabledHint" style="margin:-4px 0 8px 32px">
+          Off means it is never flagged as low or added to the shopping list.
+        </p>
+        <div id="lowStockFields" hidden>
+          <div class="field">
+            <label for="fLow">Low-stock threshold <span class="hint">blank = use the household default</span></label>
+            <input id="fLow" type="number" min="0" step="1" placeholder="">
+          </div>
         </div>
         <div class="check">
           <input id="fOnList" type="checkbox">
@@ -732,6 +741,11 @@ function fromRow(row) {
     stockDate: row.stock_date || '',
     opened: !!row.opened,
     lowStock: row.low_stock === null || row.low_stock === undefined ? null : Number(row.low_stock),
+    // Missing column or a legacy null both mean "watched", so rows written
+    // before migration 003 keep behaving as they always did.
+    lowStockEnabled: row.low_stock_enabled === null || row.low_stock_enabled === undefined
+      ? true
+      : !!row.low_stock_enabled,
     onList: !!row.on_list,
     barcode: row.barcode || '',
     notes: row.notes || '',
@@ -743,6 +757,11 @@ function fromRow(row) {
    case the barcode field is left out of writes so adds and edits keep working
    instead of failing with "column does not exist". */
 let barcodeColumnExists = false;
+
+/* Set once at start-up: false when migration 003 has not been run. While it
+   is false every item is treated as watched, which is exactly how the app
+   behaved before the toggle existed. */
+let lowStockToggleColumnExists = false;
 
 function toRow(item) {
   const row = {
@@ -759,22 +778,36 @@ function toRow(item) {
     notes: item.notes || null
   };
   if (barcodeColumnExists) row.barcode = item.barcode || null;
+  if (lowStockToggleColumnExists) row.low_stock_enabled = item.lowStockEnabled !== false;
   return row;
 }
 
 /**
- * Ask PostgREST for the barcode column. A 400 means migration 002 has not
- * been run yet; everything except remembering the barcode still works.
+ * Ask PostgREST whether an optional column exists. A 400 means the matching
+ * migration has not been run yet.
  */
-async function detectBarcodeColumn() {
+async function columnExists(column) {
   try {
-    await rest('?select=barcode&limit=1');
-    barcodeColumnExists = true;
+    await rest(`?select=${encodeURIComponent(column)}&limit=1`);
+    return true;
   } catch (err) {
-    barcodeColumnExists = false;
-    console.info('Barcode column not present - run supabase/002-add-barcode.sql to store scanned barcodes.');
+    return false;
   }
-  return barcodeColumnExists;
+}
+
+/** Probe every optional column once, at start-up. */
+async function detectOptionalColumns() {
+  [barcodeColumnExists, lowStockToggleColumnExists] = await Promise.all([
+    columnExists('barcode'),
+    columnExists('low_stock_enabled')
+  ]);
+  if (!barcodeColumnExists) {
+    console.info('No barcode column - run supabase/002-add-barcode.sql to store scanned barcodes.');
+  }
+  if (!lowStockToggleColumnExists) {
+    console.info('No low_stock_enabled column - run supabase/003-add-low-stock-toggle.sql. '
+               + 'Until then every item is watched for low stock, as before.');
+  }
 }
 
 /* ---------- REST helpers ---------- */
@@ -880,7 +913,7 @@ async function load() {
   const saved = readLocal(CONNECTION_KEY, null);
   conn.configured = applyConnection(saved || (typeof window !== 'undefined' && window.APP_CONFIG) || {});
   if (conn.configured) {
-    await detectBarcodeColumn();
+    await detectOptionalColumns();
     await loadItems();
   } else {
     renderConnBar();
@@ -966,7 +999,7 @@ function sampleItems() {
     ['Apple juice',        'Drinks',            6, 'bottles',  'Basement storage room', rel(75),      {}],
     // Low stock -> lands on the shopping list.
     ['Olive oil',          'Condiments',        1, 'bottles',  'Pantry',                rel(320),     { lowStock: 2 }],
-    ['Peanut butter',      'Condiments',        0, 'jars',     'Pantry',                rel(260),     {}],
+    ['Peanut butter',      'Condiments',        0, 'jars',     'Pantry',                rel(260),     { watch: true }],
     // No expiry date on the package -> flagged for review, blank allowed.
     ['Baking soda',        'Baking',            1, 'boxes',    'Basement storage room', '',           {}],
     ['Rolled oats',        'Breakfast',         2, 'bags',     'Basement storage room', '',           { opened: true }]
@@ -977,6 +1010,8 @@ function sampleItems() {
     stockDate: isoAddDays(t, -(rows.length - i)),  // staggered so "recently added" looks real
     opened: extra.opened || false,
     lowStock: extra.lowStock ?? null,              // null = use the default threshold
+    // Only the staples worth re-buying are watched, matching the new default.
+    lowStockEnabled: extra.watch === true || extra.lowStock != null,
     onList: false,
     notes: extra.notes || ''
   }));
@@ -1073,7 +1108,24 @@ function lowStockThreshold(item) {
 }
 
 /** Low stock rule: quantity is at or below the threshold. */
+/**
+ * Is this item watched for low stock at all?
+ * Anything other than an explicit false counts as watched, so items saved
+ * before migration 003 - and every item when the column is missing - keep
+ * the original behaviour.
+ */
+function lowStockWatched(item) {
+  return item.lowStockEnabled !== false;
+}
+
+/**
+ * Low stock rule: quantity at or below the threshold, but only for items
+ * being watched. Every low-stock surface in the app - the dashboard tile,
+ * the row badges, the inventory filter and the shopping list - goes through
+ * here, so switching the toggle off removes the item from all of them.
+ */
 function isLowStock(item) {
+  if (!lowStockWatched(item)) return false;
   return Number(item.qty) <= lowStockThreshold(item);
 }
 
@@ -1367,7 +1419,9 @@ function renderShopping() {
   // "Do not buy": comfortably in stock, so do not pick more up at the store.
   const q = $('#qShop').value.trim().toLowerCase();
   const avoid = state.items
-    .filter((i) => !isOnShoppingList(i) && expiryStatus(i) !== 'expired')
+    // Unwatched items can now sit at zero without reaching the buy list, so
+    // guard explicitly rather than claiming you already have something.
+    .filter((i) => !isOnShoppingList(i) && expiryStatus(i) !== 'expired' && Number(i.qty) > 0)
     .filter((i) => !q || `${i.name} ${i.category}`.toLowerCase().includes(q)
                       || normalizeName(i.name).includes(normalizeName(q)))
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -1451,6 +1505,9 @@ function openForm(item) {
   $('#fExpiry').value = item ? (item.expiry || '') : '';
   $('#fOpened').checked = item ? !!item.opened : false;
   $('#fLow').value    = item && item.lowStock !== null && item.lowStock !== undefined ? item.lowStock : '';
+  // New items are not watched - most things in the basement do not need it.
+  // Existing items keep whatever they were saved with.
+  setLowStockEnabled(item ? lowStockWatched(item) : false);
   $('#fOnList').checked = item ? !!item.onList : false;
   $('#fNotes').value  = item ? (item.notes || '') : '';
   $('#stockDateLabel').textContent = item
@@ -1466,6 +1523,22 @@ function openForm(item) {
   $('#itemDialog').showModal();
   if (!item) setTimeout(() => $('#fName').focus(), 50);
   checkDuplicatesInForm();
+}
+
+/**
+ * Show or hide the threshold field to match the toggle.
+ * Without migration 003 the toggle is forced on and disabled: the app cannot
+ * store a per-item choice, and pretending otherwise would silently lose it.
+ */
+function setLowStockEnabled(on) {
+  const box = $('#fLowEnabled');
+  const locked = !lowStockToggleColumnExists;
+  box.checked = locked ? true : !!on;
+  box.disabled = locked;
+  $('#lowStockFields').hidden = !box.checked;
+  $('#lowEnabledHint').textContent = locked
+    ? 'Run migration 003 in Supabase to turn this off per item. For now every item is watched, as before.'
+    : 'Off means it is never flagged as low or added to the shopping list.';
 }
 
 /** Live duplicate warning while the form is open (brief section 6). */
@@ -1527,6 +1600,7 @@ function saveForm(event) {
     expiry: $('#fExpiry').value || '',
     opened: $('#fOpened').checked,
     lowStock: lowRaw === '' ? null : Number(lowRaw),
+    lowStockEnabled: $('#fLowEnabled').checked,
     onList: $('#fOnList').checked,
     barcode: formBarcode,
     notes: $('#fNotes').value.trim()
@@ -1635,6 +1709,8 @@ function wireEvents() {
   });
   ['#fName', '#fCat', '#fLoc'].forEach((sel) =>
     $(sel).addEventListener('input', checkDuplicatesInForm));
+
+  $('#fLowEnabled').addEventListener('change', (e) => setLowStockEnabled(e.target.checked));
 
   // Barcode scanning
   $('#btnScan').addEventListener('click', scanIntoForm);

@@ -20,6 +20,7 @@ create table if not exists public.inventory (
   stock_date  date        not null default current_date,             -- set automatically on entry
 
   opened      boolean     not null default false,
+  low_stock_enabled boolean not null default true,                     -- is this item watched for low stock at all?
   low_stock   smallint    check (low_stock is null or low_stock >= 0), -- null = use household default
   on_list     boolean     not null default false,                    -- "always keep on the shopping list"
   barcode     text,                                                  -- EAN/UPC from the scanner, if scanned
