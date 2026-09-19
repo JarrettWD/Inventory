@@ -15,7 +15,7 @@
    already installed an older copy pick the new one up.
    ========================================================================== */
 
-const CACHE_VERSION = 'v6';   // v6: prefer English product names
+const CACHE_VERSION = 'v7';   // v7: detect French text in English name fields
 const CACHE_NAME = `food-inventory-shell-${CACHE_VERSION}`;
 
 /* Files the app needs to start. Relative paths so it works from a subfolder

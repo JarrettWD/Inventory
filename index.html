@@ -2054,24 +2054,78 @@ function categoryFromOFF(...tagLists) {
  * Returns { name, language } where language is 'en' when we are confident the
  * name is English, otherwise the product's own language code.
  */
+/* Unambiguously French words that turn up on Canadian packaging. Kept
+   deliberately narrow: anything also used in English food writing (sauce,
+   pain, jus, orange, portion, filet) is left out so genuinely English names
+   are not flagged by mistake. */
+const FRENCH_MARKERS = new RegExp(
+  '\\b(soupe|tomate|tomates|poulet|boeuf|b\u0153uf|porc|dinde|jambon|saucisse|poisson' +
+  '|legume|legumes|l\u00e9gume|l\u00e9gumes|fromage|lait|cr\u00e8me|beurre|oeufs?|\u0153ufs?' +
+  '|fraise|framboise|p\u00eache|haricots?|pois|carottes?|champignons?|\u00e9pinards?' +
+  '|farine|sucre|huile|vinaigre|miel|confiture|chocolat|caf\u00e9|th\u00e9|biscuits?' +
+  '|riz|bl\u00e9|avoine|nouilles|p\u00e2tes|morceaux|tranch\u00e9e?s?|fum\u00e9e?s?' +
+  '|aux|avec|sans|dans)\\b', 'i');
+
+/**
+ * Guess whether a name is written in something other than English.
+ * Returns a language code, or null when it reads as English (or we cannot
+ * tell). This exists because Open Food Facts contributors routinely paste the
+ * French side of a bilingual Canadian package into product_name_en, so the
+ * field name alone cannot be trusted.
+ */
+function detectNameLanguage(text) {
+  const s = String(text || '').toLowerCase();
+  if (!s) return null;
+  if (FRENCH_MARKERS.test(s)) return 'fr';
+  // Accents English product names essentially never carry.
+  if (/[\u00e0\u00e2\u00e7\u00e8\u00e9\u00ea\u00eb\u00ee\u00ef\u00f4\u00f9\u00fb\u0153]/.test(s)) return 'fr';
+  return null;
+}
+
+/**
+ * Pick the most English name Open Food Facts offers.
+ *
+ * Two separate problems have to be handled:
+ *   1. Canadian products are often entered with French as the primary
+ *      language, so the generic `product_name` is French even when a real
+ *      `product_name_en` exists. (Asking the API for lc=en does not help -
+ *      verified; it returns the same generic name.)
+ *   2. `product_name_en` itself frequently contains French text, because the
+ *      package is bilingual and whoever added it pasted the wrong side.
+ *      Barcode 0063211019537 is exactly this: lang=en, and all three name
+ *      fields hold "Campbell's soupe tomate".
+ *
+ * So each candidate is checked for what it actually reads as, not just which
+ * field it came from.
+ */
 function pickProductName(p) {
   const clean = (v) => (typeof v === 'string' ? v.trim() : '');
   const primaryLang = clean(p.lang || p.lc).toLowerCase();
+  const genericIsEnglish = !primaryLang || primaryLang === 'en';
 
-  // 1. An explicitly English name, or an English generic description.
-  const english = clean(p.product_name_en) || clean(p.generic_name_en);
-  if (english) return { name: english, language: 'en' };
+  const candidates = [
+    { text: clean(p.product_name_en), claimsEnglish: true },
+    { text: clean(p.generic_name_en), claimsEnglish: true },
+    { text: clean(p.product_name),    claimsEnglish: genericIsEnglish },
+    { text: clean(p.generic_name),    claimsEnglish: genericIsEnglish },
+    { text: clean(p.product_name_fr), claimsEnglish: false, language: 'fr' }
+  ].filter((c) => c.text);
 
-  // 2. The generic name, but only trusted as English when the product itself
-  //    is an English entry (or does not say).
-  const generic = clean(p.product_name);
-  if (generic && (!primaryLang || primaryLang === 'en')) return { name: generic, language: 'en' };
+  if (!candidates.length) return null;
 
-  // 3. No English anywhere: a name in another language beats no name at all.
-  const other = generic || clean(p.product_name_fr) || clean(p.generic_name);
-  if (other) return { name: other, language: primaryLang || 'unknown' };
+  // First choice: a field that claims to be English AND does not read as
+  // another language.
+  for (const c of candidates) {
+    if (c.claimsEnglish && !detectNameLanguage(c.text)) {
+      return { name: c.text, language: 'en' };
+    }
+  }
 
-  return null;
+  // Nothing genuinely English is on file. Use the best name available and
+  // report the language honestly, so the form can say so.
+  const best = candidates[0];
+  const language = detectNameLanguage(best.text) || best.language || primaryLang || 'unknown';
+  return { name: best.text, language, noEnglishOnFile: true };
 }
 
 /**
@@ -2101,6 +2155,7 @@ async function lookupProduct(code) {
   return {
     name: picked.name,
     language: picked.language,
+    noEnglishOnFile: !!picked.noEnglishOnFile,
     category: categoryFromOFF(p.categories_tags_en, p.categories_tags),
     brands: (p.brands || '').trim(),
     quantity: (p.quantity || '').trim()
@@ -2164,7 +2219,8 @@ async function scanIntoForm() {
   const LANGUAGE_NAMES = { fr: 'French', es: 'Spanish', de: 'German', it: 'Italian', nl: 'Dutch', pt: 'Portuguese' };
   const notes = [`Matched: ${product.name}`];
   if (product.language && product.language !== 'en') {
-    notes.push(`only a ${LANGUAGE_NAMES[product.language] || product.language} name was on file - edit it if you like`);
+    const lang = LANGUAGE_NAMES[product.language] || product.language;
+    notes.push(`no English name on file, this one is ${lang} - edit it if you like`);
   }
   if (!product.category) notes.push('category unknown - pick one');
   renderBarcodeChip(notes.join(' - '));
