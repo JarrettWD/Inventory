@@ -15,7 +15,7 @@
    already installed an older copy pick the new one up.
    ========================================================================== */
 
-const CACHE_VERSION = 'v3';   // v3: renamed to Inventory Tracker / Inventory
+const CACHE_VERSION = 'v4';   // v4: new icon design
 const CACHE_NAME = `food-inventory-shell-${CACHE_VERSION}`;
 
 /* Files the app needs to start. Relative paths so it works from a subfolder
