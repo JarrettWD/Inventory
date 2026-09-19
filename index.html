@@ -1996,25 +1996,81 @@ function stopScanner() {
 /* OFF category tags are granular ("en:breakfast-cereals"). Map them onto the
    household categories, most specific first - "frozen meat" must beat both
    "frozen" and "meat". */
+/* Open Food Facts puts broad umbrella tags on almost everything. They carry
+   no useful signal and actively mislead: "plant-based-foods-and-beverages"
+   sits on tinned soup and would otherwise match the Drinks rule. */
+const OFF_NOISE_TAGS = new Set([
+  'plant-based-foods-and-beverages', 'plant-based-foods', 'fruits-and-vegetables-based-foods',
+  'vegetable-based-foods-and-beverages', 'vegetables-based-foods', 'cereals-and-potatoes',
+  'groceries', 'foods', 'beverages-and-beverages-preparations'
+]);
+
+/* Ordered, most specific first. Drinks sits last because its keywords are the
+   easiest to trip accidentally. */
 const OFF_CATEGORY_RULES = [
   [/frozen.*(meat|chicken|beef|pork|fish|seafood)|(meat|chicken|beef|fish).*frozen/, 'Frozen meat'],
   [/frozen.*(meal|pizza|dinner|entree)|ready.*meal/, 'Frozen meals'],
   [/frozen|ice-cream/, 'Frozen other'],
   [/canned|tinned|preserved-/, 'Canned goods'],
+  [/soup|broth|bouillon|stock\b/, 'Canned goods'],
   [/pasta|rice|noodle|grain|couscous|quinoa/, 'Pasta/rice/grains'],
   [/breakfast|cereal|oat|muesli|granola/, 'Breakfast'],
-  [/beverage|drink|water|juice|soda|coffee|tea|milk/, 'Drinks'],
   [/snack|biscuit|cookie|chocolate|candy|confection|crisp|chip|bar\b/, 'Snacks'],
   [/sauce|condiment|spread|oil|vinegar|mayonnaise|ketchup|mustard|honey|jam/, 'Condiments'],
   [/flour|sugar|baking|yeast|cocoa/, 'Baking'],
-  [/legume|bean|lentil|chickpea|dried|dry-good|flake|seed|nut/, 'Dry goods']
+  [/legume|bean|lentil|chickpea|dried|dry-good|flake|seed|nut/, 'Dry goods'],
+  [/beverage|drink|water|juice|soda|coffee|tea\b|milk/, 'Drinks']
 ];
 
-function categoryFromOFF(tags) {
-  const joined = (tags || []).join(' ').toLowerCase();
-  for (const [pattern, category] of OFF_CATEGORY_RULES) {
-    if (pattern.test(joined) && state.settings.categories.includes(category)) return category;
+/* Category tags carry a language prefix ("en:canned-foods", "fr:Conserves").
+   Match against the English ones first; only if nothing matches do we fall
+   back to the rest, with the prefix stripped so the slug text still reads. */
+function categoryFromOFF(...tagLists) {
+  const strip = (t) => String(t).replace(/^[a-z]{2}(?:-[a-z]{2})?:/i, '');
+  const useful = (list) => list.map(strip).filter((t) => !OFF_NOISE_TAGS.has(t.toLowerCase()));
+  const merged = tagLists.filter(Array.isArray).flat();
+  const englishFirst = [
+    useful(merged.filter((t) => /^en:/i.test(t))),   // English tags only
+    useful(merged)                                   // anything, as a fallback
+  ];
+  for (const set of englishFirst) {
+    if (!set.length) continue;
+    const joined = set.join(' ').toLowerCase();
+    for (const [pattern, category] of OFF_CATEGORY_RULES) {
+      if (pattern.test(joined) && state.settings.categories.includes(category)) return category;
+    }
   }
+  return null;
+}
+
+/**
+ * Pick the most English name Open Food Facts offers.
+ *
+ * Canadian products are often entered with French as the primary language,
+ * so the generic `product_name` can come back as "Soupe aux pois" even when
+ * `product_name_en` holds a perfectly good English name. Note that asking the
+ * API for lc=en does NOT change this - the preference has to happen here.
+ *
+ * Returns { name, language } where language is 'en' when we are confident the
+ * name is English, otherwise the product's own language code.
+ */
+function pickProductName(p) {
+  const clean = (v) => (typeof v === 'string' ? v.trim() : '');
+  const primaryLang = clean(p.lang || p.lc).toLowerCase();
+
+  // 1. An explicitly English name, or an English generic description.
+  const english = clean(p.product_name_en) || clean(p.generic_name_en);
+  if (english) return { name: english, language: 'en' };
+
+  // 2. The generic name, but only trusted as English when the product itself
+  //    is an English entry (or does not say).
+  const generic = clean(p.product_name);
+  if (generic && (!primaryLang || primaryLang === 'en')) return { name: generic, language: 'en' };
+
+  // 3. No English anywhere: a name in another language beats no name at all.
+  const other = generic || clean(p.product_name_fr) || clean(p.generic_name);
+  if (other) return { name: other, language: primaryLang || 'unknown' };
+
   return null;
 }
 
@@ -2023,8 +2079,11 @@ function categoryFromOFF(tags) {
  * unknown or the network is unavailable - callers must cope with that.
  */
 async function lookupProduct(code) {
+  // lang/lc tell us which language the generic product_name is written in;
+  // the _en variants are what we actually want when they exist.
   const url = `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json`
-            + '?fields=product_name,product_name_en,brands,categories_tags,quantity';
+            + '?fields=product_name,product_name_en,product_name_fr,generic_name,generic_name_en'
+            + ',lang,lc,brands,categories_tags,categories_tags_en,quantity';
   let data;
   try {
     const res = await fetch(url, { headers: { Accept: 'application/json' } });
@@ -2037,11 +2096,12 @@ async function lookupProduct(code) {
   if (!data || data.status !== 1 || !data.product) return null;
 
   const p = data.product;
-  const name = (p.product_name_en || p.product_name || '').trim();
-  if (!name) return null;
+  const picked = pickProductName(p);
+  if (!picked) return null;
   return {
-    name,
-    category: categoryFromOFF(p.categories_tags),
+    name: picked.name,
+    language: picked.language,
+    category: categoryFromOFF(p.categories_tags_en, p.categories_tags),
     brands: (p.brands || '').trim(),
     quantity: (p.quantity || '').trim()
   };
@@ -2099,8 +2159,15 @@ async function scanIntoForm() {
   const extra = [product.brands, product.quantity].filter(Boolean).join(' - ');
   if (extra && !$('#fNotes').value.trim()) $('#fNotes').value = extra;
 
-  renderBarcodeChip(product.category ? `Matched: ${product.name}`
-                                     : `Matched: ${product.name} (category unknown - pick one)`);
+  // Say so when only a non-English name was on file, so an unexpected
+  // "Soupe aux pois" reads as the database's doing rather than a bug.
+  const LANGUAGE_NAMES = { fr: 'French', es: 'Spanish', de: 'German', it: 'Italian', nl: 'Dutch', pt: 'Portuguese' };
+  const notes = [`Matched: ${product.name}`];
+  if (product.language && product.language !== 'en') {
+    notes.push(`only a ${LANGUAGE_NAMES[product.language] || product.language} name was on file - edit it if you like`);
+  }
+  if (!product.category) notes.push('category unknown - pick one');
+  renderBarcodeChip(notes.join(' - '));
   checkDuplicatesInForm();
 }
 
