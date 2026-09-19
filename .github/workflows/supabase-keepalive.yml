@@ -1,0 +1,104 @@
+# ===========================================================================
+# Supabase keep-alive
+#
+# Free Supabase projects pause after about a week with no database activity.
+# This runs a real read against the inventory table every two days, which both
+# keeps the project active and doubles as a health check - if the project is
+# paused, unreachable, or the key has been rotated, this job goes red and the
+# run summary says why.
+#
+# Credentials come from repository secrets, never from this file:
+#   SUPABASE_URL       e.g. https://your-ref.supabase.co
+#   SUPABASE_ANON_KEY  the publishable (anon) key - NOT a secret/service key
+# ===========================================================================
+
+name: Supabase keep-alive
+
+on:
+  schedule:
+    # 07:23 UTC on odd days of the month. Deliberately not on the hour:
+    # GitHub delays scheduled runs when everyone piles onto :00.
+    - cron: '23 7 */2 * *'
+  workflow_dispatch:        # lets you run it by hand from the Actions tab
+
+permissions:
+  contents: read            # this job only reads; it never writes to the repo
+
+concurrency:
+  group: supabase-keepalive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    name: Query Supabase
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Read one row from the inventory table
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          TABLE: inventory
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SUPABASE_URL}" ] || [ -z "${SUPABASE_KEY}" ]; then
+            echo "::error::Missing repository secrets. Add SUPABASE_URL and SUPABASE_ANON_KEY under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+          # Strip any trailing slash so the path below cannot double up.
+          base="${SUPABASE_URL%/}"
+
+          body="$(mktemp)"
+          headers="$(mktemp)"
+
+          # Prefer: count=exact makes PostgREST report the total row count in
+          # the Content-Range header, so one request is both the keep-alive
+          # and a useful signal about the table.
+          code="$(curl --silent --show-error \
+            --max-time 30 --retry 3 --retry-delay 10 --retry-connrefused \
+            --output "${body}" --dump-header "${headers}" --write-out '%{http_code}' \
+            --header "apikey: ${SUPABASE_KEY}" \
+            --header "Authorization: Bearer ${SUPABASE_KEY}" \
+            --header "Prefer: count=exact" \
+            "${base}/rest/v1/${TABLE}?select=id&limit=1")" || code="000"
+
+          if [ "${code}" = "000" ]; then
+            echo "::error::Could not reach Supabase at all. The project may be paused, or SUPABASE_URL may be wrong."
+            exit 1
+          fi
+
+          # PostgREST answers 206 Partial Content when limit= is combined with
+          # Prefer: count=exact, because the body is a slice of the full set.
+          # Both 200 and 206 mean the query really ran.
+          if [ "${code}" != "200" ] && [ "${code}" != "206" ]; then
+            echo "::error::Supabase returned HTTP ${code}."
+            echo "Response body:"
+            head -c 500 "${body}" || true
+            echo
+            case "${code}" in
+              401|403) echo "::notice::A 401/403 usually means the key was rotated. Update the SUPABASE_ANON_KEY secret." ;;
+              404)     echo "::notice::A 404 usually means the ${TABLE} table is missing. Run supabase/schema.sql." ;;
+              5*)      echo "::notice::A 5xx often means the project is paused or waking up." ;;
+            esac
+            exit 1
+          fi
+
+          # Content-Range looks like "0-0/18"; the part after the slash is the total.
+          # grep is wrapped so a missing header cannot trip `set -e`/pipefail.
+          rows="$({ grep -i '^content-range:' "${headers}" || true; } | tr -d '\r' | sed 's#.*/##' | tail -n1)"
+          [ -n "${rows}" ] || rows="unknown"
+
+          echo "OK - HTTP 200, ${rows} row(s) in ${TABLE}."
+
+          {
+            echo "### Supabase keep-alive"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Status | \`HTTP ${code}\` |"
+            echo "| Rows in \`${TABLE}\` | **${rows}** |"
+            echo "| Checked | $(date -u '+%Y-%m-%d %H:%M UTC') |"
+          } >> "${GITHUB_STEP_SUMMARY}"
