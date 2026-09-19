@@ -22,6 +22,7 @@ create table if not exists public.inventory (
   opened      boolean     not null default false,
   low_stock   smallint    check (low_stock is null or low_stock >= 0), -- null = use household default
   on_list     boolean     not null default false,                    -- "always keep on the shopping list"
+  barcode     text,                                                  -- EAN/UPC from the scanner, if scanned
   notes       text,
 
   updated_at  timestamptz not null default now()

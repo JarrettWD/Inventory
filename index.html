@@ -276,6 +276,33 @@ details.optional summary{
 }
 .busy{opacity:.55; pointer-events:none}
 
+/* ---------- Barcode scanner ---------- */
+.scan-frame{
+  position:relative; width:100%; aspect-ratio:4/3;
+  background:#000; border-radius:12px; overflow:hidden;
+}
+.scan-frame video{width:100%; height:100%; object-fit:cover; display:block}
+/* Aiming guide. Purely decorative - the detector reads the whole frame. */
+.scan-reticle{
+  position:absolute; inset:18% 8%; pointer-events:none;
+  border:3px solid rgba(255,255,255,.9); border-radius:10px;
+  box-shadow:0 0 0 100vmax rgba(0,0,0,.35);
+}
+.scan-status{min-height:2.6em; margin-top:10px}
+.scan-status.is-error{color:var(--danger); font-weight:600}
+
+/* The scanned code shown on the add/edit form */
+.barcode-chip{
+  display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+  background:var(--ok-bg); border:1px solid var(--ok);
+  border-radius:10px; padding:8px 10px; margin-top:8px;
+}
+.barcode-chip code{
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-weight:700; color:var(--ok);
+}
+.barcode-chip .grow{flex:1; min-width:0}
+
 /* ---------- Toast ---------- */
 #toast{
   position:fixed; left:50%; transform:translateX(-50%);
@@ -428,6 +455,21 @@ details.optional summary{
     <div class="dlg-body">
       <div id="dupWarn"></div>
 
+      <!-- Scanning fills in the name and category below; typing still works. -->
+      <div class="field">
+        <button type="button" class="btn wide" id="btnScan">
+          <span aria-hidden="true">&#128247;</span> Scan barcode
+        </button>
+        <div class="barcode-chip" id="barcodeChip" hidden>
+          <div class="grow">
+            <div class="small muted">Barcode</div>
+            <code id="barcodeValue"></code>
+            <div class="small muted" id="barcodeNote"></div>
+          </div>
+          <button type="button" class="btn sm" id="btnClearBarcode">Clear</button>
+        </div>
+      </div>
+
       <div class="field">
         <label for="fName">Item name *</label>
         <input id="fName" required autocomplete="off" placeholder="Canned tomatoes">
@@ -487,6 +529,22 @@ details.optional summary{
       <button type="submit" class="btn primary" id="btnSave">Save</button>
     </div>
   </form>
+</dialog>
+
+<!-- ============ BARCODE SCANNER ============ -->
+<dialog id="scanDialog" aria-labelledby="scanTitle">
+  <div class="dlg-head">
+    <h2 id="scanTitle">Scan barcode</h2>
+    <button type="button" class="btn sm" id="btnScanClose">Cancel</button>
+  </div>
+  <div class="dlg-body">
+    <div class="scan-frame">
+      <!-- playsinline + muted keep iOS/Android from taking the video fullscreen -->
+      <video id="scanVideo" playsinline muted autoplay></video>
+      <div class="scan-reticle"></div>
+    </div>
+    <p class="small scan-status" id="scanStatus" role="status" aria-live="polite"></p>
+  </div>
 </dialog>
 
 <!-- ============ FIRST-RUN CONNECTION SETUP ============ -->
@@ -675,13 +733,19 @@ function fromRow(row) {
     opened: !!row.opened,
     lowStock: row.low_stock === null || row.low_stock === undefined ? null : Number(row.low_stock),
     onList: !!row.on_list,
+    barcode: row.barcode || '',
     notes: row.notes || '',
     updatedAt: row.updated_at || ''
   };
 }
 
+/* Set once at start-up: false when migration 002 has not been run, in which
+   case the barcode field is left out of writes so adds and edits keep working
+   instead of failing with "column does not exist". */
+let barcodeColumnExists = false;
+
 function toRow(item) {
-  return {
+  const row = {
     name: item.name,
     category: item.category,
     location: item.location,
@@ -694,6 +758,23 @@ function toRow(item) {
     on_list: !!item.onList,
     notes: item.notes || null
   };
+  if (barcodeColumnExists) row.barcode = item.barcode || null;
+  return row;
+}
+
+/**
+ * Ask PostgREST for the barcode column. A 400 means migration 002 has not
+ * been run yet; everything except remembering the barcode still works.
+ */
+async function detectBarcodeColumn() {
+  try {
+    await rest('?select=barcode&limit=1');
+    barcodeColumnExists = true;
+  } catch (err) {
+    barcodeColumnExists = false;
+    console.info('Barcode column not present - run supabase/002-add-barcode.sql to store scanned barcodes.');
+  }
+  return barcodeColumnExists;
 }
 
 /* ---------- REST helpers ---------- */
@@ -798,8 +879,12 @@ async function load() {
   state.settings = { ...DEFAULT_SETTINGS, ...readLocal(STORAGE_KEY + '.settings', {}) };
   const saved = readLocal(CONNECTION_KEY, null);
   conn.configured = applyConnection(saved || (typeof window !== 'undefined' && window.APP_CONFIG) || {});
-  if (conn.configured) await loadItems();
-  else renderConnBar();
+  if (conn.configured) {
+    await detectBarcodeColumn();
+    await loadItems();
+  } else {
+    renderConnBar();
+  }
 }
 
 /**
@@ -1372,6 +1457,9 @@ function openForm(item) {
     ? `Stocked on ${formatDate(item.stockDate)}`
     : `Stock date will be set to today (${formatDate(todayISO())}).`;
 
+  formBarcode = item ? (item.barcode || '') : '';
+  renderBarcodeChip();
+
   $('#btnDelete').hidden = !item;
   $('#errName').hidden = true;
   $('#dupWarn').innerHTML = '';
@@ -1388,20 +1476,38 @@ function checkDuplicatesInForm() {
     location: $('#fLoc').value
   };
   const box = $('#dupWarn');
-  if (candidate.name.length < 2) { box.innerHTML = ''; return; }
 
-  const { exact, similar } = findDuplicates(candidate, editingId);
-  if (!exact.length && !similar.length) { box.innerHTML = ''; return; }
+  // A matching barcode is the strongest signal there is - it beats any
+  // name comparison, so it is checked first and shown separately.
+  const byBarcode = formBarcode
+    ? sortByExpiry(state.items.filter((i) => i.id !== editingId && i.barcode && i.barcode === formBarcode))
+    : [];
+
+  if (!byBarcode.length && candidate.name.length < 2) { box.innerHTML = ''; return; }
+
+  const { exact, similar } = candidate.name.length >= 2
+    ? findDuplicates(candidate, editingId)
+    : { exact: [], similar: [] };
+
+  // Anything already listed by barcode should not be repeated below.
+  const seen = new Set(byBarcode.map((i) => i.id));
+  const exactRest = exact.filter((i) => !seen.has(i.id));
+  const similarRest = similar.filter((i) => !seen.has(i.id));
+
+  if (!byBarcode.length && !exactRest.length && !similarRest.length) { box.innerHTML = ''; return; }
 
   const line = (i) => `<li><strong>${esc(i.name)}</strong> &ndash; ${esc(i.qty)} ${esc(i.unit || '')} in
       ${esc(i.location)} &middot; ${i.expiry ? esc(expiryPhrase(daysUntil(i.expiry))) : 'no expiry date'}</li>`;
 
+  const mergeTarget = byBarcode[0] || exactRest[0];
+
   box.innerHTML = `
     <div class="dup-warn">
       <h3>You may already have this</h3>
-      ${exact.length ? `<p class="small">Same name, category and location:</p><ul>${exact.map(line).join('')}</ul>` : ''}
-      ${similar.length ? `<p class="small">Similar items elsewhere:</p><ul>${similar.map(line).join('')}</ul>` : ''}
-      ${exact.length ? `<button type="button" class="btn sm" data-act="merge" data-id="${exact[0].id}">Add to the existing entry instead</button>` : ''}
+      ${byBarcode.length ? `<p class="small">Same barcode:</p><ul>${byBarcode.map(line).join('')}</ul>` : ''}
+      ${exactRest.length ? `<p class="small">Same name, category and location:</p><ul>${exactRest.map(line).join('')}</ul>` : ''}
+      ${similarRest.length ? `<p class="small">Similar items elsewhere:</p><ul>${similarRest.map(line).join('')}</ul>` : ''}
+      ${mergeTarget ? `<button type="button" class="btn sm" data-act="merge" data-id="${mergeTarget.id}">Add to the existing entry instead</button>` : ''}
     </div>`;
 }
 
@@ -1422,6 +1528,7 @@ function saveForm(event) {
     opened: $('#fOpened').checked,
     lowStock: lowRaw === '' ? null : Number(lowRaw),
     onList: $('#fOnList').checked,
+    barcode: formBarcode,
     notes: $('#fNotes').value.trim()
   };
 
@@ -1528,6 +1635,19 @@ function wireEvents() {
   });
   ['#fName', '#fCat', '#fLoc'].forEach((sel) =>
     $(sel).addEventListener('input', checkDuplicatesInForm));
+
+  // Barcode scanning
+  $('#btnScan').addEventListener('click', scanIntoForm);
+  $('#btnClearBarcode').addEventListener('click', () => setFormBarcode('', ''));
+  $('#btnScanClose').addEventListener('click', () => {
+    if (typeof scanState.onResult === 'function') scanState.onResult(null);
+    else stopScanner();
+  });
+  // Closing by Esc or the backdrop must release the camera too.
+  $('#scanDialog').addEventListener('close', () => {
+    if (typeof scanState.onResult === 'function') scanState.onResult(null);
+    else stopScanner();
+  });
 
   // Filters
   ['#q', '#fCategory', '#fLocation', '#fStatus', '#fSort'].forEach((sel) =>
@@ -1686,7 +1806,430 @@ async function seedSampleData() {
 }
 
 /* ==========================================================================
-   8. CONNECTION SETUP SCREEN
+   8. BARCODE SCANNING
+   --------------------------------------------------------------------------
+   Two engines, picked at runtime:
+     1. BarcodeDetector - built into Chrome on Android, nothing to download.
+     2. ZXing - fetched from a CDN only when BarcodeDetector is missing
+        (desktop Chrome, Firefox), so phones never pay for it. Pinned with
+        an SRI hash so a tampered CDN file will not execute.
+   Neither is required for the app to work: if both fail you type the name.
+   ========================================================================== */
+
+const ZXING_URL = 'https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/zxing-browser.min.js';
+const ZXING_SRI = 'sha384-ylLhng89kD62+PVK1cjm4rAYg69zDlGrbbSfAE2Eb8Xqf8RoAQCMcRoUXZh7pAPC';
+
+/* Retail product codes plus Code 128, which some bulk items use. */
+const BARCODE_FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf'];
+
+let scanState = { stream: null, stop: null, running: false, onResult: null };
+
+function scanStatus(message, isError = false) {
+  const el = $('#scanStatus');
+  el.textContent = message;
+  el.classList.toggle('is-error', isError);
+}
+
+/** Load ZXing once, with integrity pinning. Resolves to the global or throws. */
+let zxingPromise = null;
+function loadZXing() {
+  if (window.ZXingBrowser) return Promise.resolve(window.ZXingBrowser);
+  if (zxingPromise) return zxingPromise;
+  zxingPromise = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = ZXING_URL;
+    s.integrity = ZXING_SRI;
+    s.crossOrigin = 'anonymous';
+    s.onload = () => window.ZXingBrowser ? resolve(window.ZXingBrowser)
+                                         : reject(new Error('ZXing loaded but did not register'));
+    s.onerror = () => reject(new Error('Could not download the scanner library'));
+    document.head.appendChild(s);
+  });
+  return zxingPromise;
+}
+
+/**
+ * Turn a getUserMedia failure into something a person can act on.
+ * These names are from the MediaDevices spec.
+ */
+function cameraErrorMessage(err) {
+  switch (err && err.name) {
+    case 'NotAllowedError':
+    case 'SecurityError':
+      return 'Camera access was blocked. Tap the padlock in the address bar, allow Camera, then try again.';
+    case 'NotFoundError':
+    case 'OverconstrainedError':
+      return 'No camera was found on this device.';
+    case 'NotReadableError':
+      return 'The camera is already in use by another app. Close it and try again.';
+    case 'AbortError':
+      return 'The camera stopped unexpectedly. Try again.';
+    default:
+      return `Could not start the camera (${(err && err.name) || 'unknown error'}).`;
+  }
+}
+
+/** Open the scanner. Resolves with a barcode string, or null if cancelled. */
+async function openScanner() {
+  const dlg = $('#scanDialog');
+  const video = $('#scanVideo');
+  scanStatus('Starting the camera...');
+  dlg.showModal();
+
+  // getUserMedia needs a secure context. GitHub Pages is https, but a plain
+  // http:// host or a file:// page would silently have no mediaDevices.
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    scanStatus('Scanning needs a secure connection (https). Open the hosted app rather than a local file.', true);
+    return null;
+  }
+
+  let stream;
+  try {
+    // facingMode "environment" asks for the rear camera; the browser shows
+    // its own permission prompt here, triggered by the button tap.
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+  } catch (err) {
+    console.warn('Camera failed:', err);
+    scanStatus(cameraErrorMessage(err), true);
+    return null;
+  }
+
+  scanState.stream = stream;
+  video.srcObject = stream;
+  try { await video.play(); } catch (e) { /* autoplay attribute covers this */ }
+
+  scanStatus('Point the camera at the barcode.');
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (code) => {
+      if (settled) return;
+      settled = true;
+      stopScanner();
+      resolve(code);
+    };
+    scanState.onResult = finish;
+    scanState.running = true;
+
+    if ('BarcodeDetector' in window) {
+      runNativeDetector(video, finish);
+    } else {
+      runZXing(video, finish);
+    }
+  });
+}
+
+/** Chrome on Android: poll the native detector against the video frames. */
+async function runNativeDetector(video, finish) {
+  let detector;
+  try {
+    const supported = await window.BarcodeDetector.getSupportedFormats();
+    const formats = BARCODE_FORMATS.filter((f) => supported.includes(f));
+    detector = new window.BarcodeDetector({ formats: formats.length ? formats : undefined });
+  } catch (err) {
+    console.warn('BarcodeDetector unavailable, falling back to ZXing:', err);
+    runZXing(video, finish);
+    return;
+  }
+
+  const tick = async () => {
+    if (!scanState.running) return;
+    try {
+      const codes = await detector.detect(video);
+      const hit = codes.find((c) => c.rawValue && c.rawValue.trim());
+      if (hit) { finish(hit.rawValue.trim()); return; }
+    } catch (err) {
+      // A transient detect() failure (e.g. a frame not ready) is not fatal.
+    }
+    scanState.timer = setTimeout(tick, 200);
+  };
+  scanState.stop = () => clearTimeout(scanState.timer);
+  tick();
+}
+
+/** Everywhere else: ZXing decodes continuously from the same video element. */
+async function runZXing(video, finish) {
+  scanStatus('Loading the scanner...');
+  let ZX;
+  try {
+    ZX = await loadZXing();
+  } catch (err) {
+    scanStatus('This browser has no barcode scanner and the library could not be downloaded. Type the name instead.', true);
+    return;
+  }
+  scanStatus('Point the camera at the barcode.');
+  const reader = new ZX.BrowserMultiFormatReader();
+  try {
+    // The stream is already attached to the video, so decode from the element.
+    const controls = await reader.decodeFromVideoElement(video, (result) => {
+      if (result && result.getText) finish(result.getText().trim());
+    });
+    scanState.stop = () => { try { controls.stop(); } catch (e) { /* already stopped */ } };
+  } catch (err) {
+    console.warn('ZXing failed:', err);
+    scanStatus('The scanner could not read from the camera. Type the name instead.', true);
+  }
+}
+
+/** Always release the camera - otherwise the indicator light stays on. */
+function stopScanner() {
+  scanState.running = false;
+  if (typeof scanState.stop === 'function') { try { scanState.stop(); } catch (e) { /* ignore */ } }
+  scanState.stop = null;
+  clearTimeout(scanState.timer);
+  if (scanState.stream) {
+    scanState.stream.getTracks().forEach((t) => t.stop());
+    scanState.stream = null;
+  }
+  const video = $('#scanVideo');
+  if (video) video.srcObject = null;
+  const dlg = $('#scanDialog');
+  if (dlg && dlg.open) dlg.close();
+}
+
+
+/* ---------- Open Food Facts lookup ---------- */
+
+/* OFF category tags are granular ("en:breakfast-cereals"). Map them onto the
+   household categories, most specific first - "frozen meat" must beat both
+   "frozen" and "meat". */
+/* Open Food Facts puts broad umbrella tags on almost everything. They carry
+   no useful signal and actively mislead: "plant-based-foods-and-beverages"
+   sits on tinned soup and would otherwise match the Drinks rule. */
+const OFF_NOISE_TAGS = new Set([
+  'plant-based-foods-and-beverages', 'plant-based-foods', 'fruits-and-vegetables-based-foods',
+  'vegetable-based-foods-and-beverages', 'vegetables-based-foods', 'cereals-and-potatoes',
+  'groceries', 'foods', 'beverages-and-beverages-preparations'
+]);
+
+/* Ordered, most specific first. Drinks sits last because its keywords are the
+   easiest to trip accidentally. */
+const OFF_CATEGORY_RULES = [
+  [/frozen.*(meat|chicken|beef|pork|fish|seafood)|(meat|chicken|beef|fish).*frozen/, 'Frozen meat'],
+  [/frozen.*(meal|pizza|dinner|entree)|ready.*meal/, 'Frozen meals'],
+  [/frozen|ice-cream/, 'Frozen other'],
+  [/canned|tinned|preserved-/, 'Canned goods'],
+  [/soup|broth|bouillon|stock\b/, 'Canned goods'],
+  [/pasta|rice|noodle|grain|couscous|quinoa/, 'Pasta/rice/grains'],
+  [/breakfast|cereal|oat|muesli|granola/, 'Breakfast'],
+  [/snack|biscuit|cookie|chocolate|candy|confection|crisp|chip|bar\b/, 'Snacks'],
+  [/sauce|condiment|spread|oil|vinegar|mayonnaise|ketchup|mustard|honey|jam/, 'Condiments'],
+  [/flour|sugar|baking|yeast|cocoa/, 'Baking'],
+  [/legume|bean|lentil|chickpea|dried|dry-good|flake|seed|nut/, 'Dry goods'],
+  [/beverage|drink|water|juice|soda|coffee|tea\b|milk/, 'Drinks']
+];
+
+/* Category tags carry a language prefix ("en:canned-foods", "fr:Conserves").
+   Match against the English ones first; only if nothing matches do we fall
+   back to the rest, with the prefix stripped so the slug text still reads. */
+function categoryFromOFF(...tagLists) {
+  const strip = (t) => String(t).replace(/^[a-z]{2}(?:-[a-z]{2})?:/i, '');
+  const useful = (list) => list.map(strip).filter((t) => !OFF_NOISE_TAGS.has(t.toLowerCase()));
+  const merged = tagLists.filter(Array.isArray).flat();
+  const englishFirst = [
+    useful(merged.filter((t) => /^en:/i.test(t))),   // English tags only
+    useful(merged)                                   // anything, as a fallback
+  ];
+  for (const set of englishFirst) {
+    if (!set.length) continue;
+    const joined = set.join(' ').toLowerCase();
+    for (const [pattern, category] of OFF_CATEGORY_RULES) {
+      if (pattern.test(joined) && state.settings.categories.includes(category)) return category;
+    }
+  }
+  return null;
+}
+
+/**
+ * Pick the most English name Open Food Facts offers.
+ *
+ * Canadian products are often entered with French as the primary language,
+ * so the generic `product_name` can come back as "Soupe aux pois" even when
+ * `product_name_en` holds a perfectly good English name. Note that asking the
+ * API for lc=en does NOT change this - the preference has to happen here.
+ *
+ * Returns { name, language } where language is 'en' when we are confident the
+ * name is English, otherwise the product's own language code.
+ */
+/* Unambiguously French words that turn up on Canadian packaging. Kept
+   deliberately narrow: anything also used in English food writing (sauce,
+   pain, jus, orange, portion, filet) is left out so genuinely English names
+   are not flagged by mistake. */
+const FRENCH_MARKERS = new RegExp(
+  '\\b(soupe|tomate|tomates|poulet|boeuf|b\u0153uf|porc|dinde|jambon|saucisse|poisson' +
+  '|legume|legumes|l\u00e9gume|l\u00e9gumes|fromage|lait|cr\u00e8me|beurre|oeufs?|\u0153ufs?' +
+  '|fraise|framboise|p\u00eache|haricots?|pois|carottes?|champignons?|\u00e9pinards?' +
+  '|farine|sucre|huile|vinaigre|miel|confiture|chocolat|caf\u00e9|th\u00e9|biscuits?' +
+  '|riz|bl\u00e9|avoine|nouilles|p\u00e2tes|morceaux|tranch\u00e9e?s?|fum\u00e9e?s?' +
+  '|aux|avec|sans|dans)\\b', 'i');
+
+/**
+ * Guess whether a name is written in something other than English.
+ * Returns a language code, or null when it reads as English (or we cannot
+ * tell). This exists because Open Food Facts contributors routinely paste the
+ * French side of a bilingual Canadian package into product_name_en, so the
+ * field name alone cannot be trusted.
+ */
+function detectNameLanguage(text) {
+  const s = String(text || '').toLowerCase();
+  if (!s) return null;
+  if (FRENCH_MARKERS.test(s)) return 'fr';
+  // Accents English product names essentially never carry.
+  if (/[\u00e0\u00e2\u00e7\u00e8\u00e9\u00ea\u00eb\u00ee\u00ef\u00f4\u00f9\u00fb\u0153]/.test(s)) return 'fr';
+  return null;
+}
+
+/**
+ * Pick the most English name Open Food Facts offers.
+ *
+ * Two separate problems have to be handled:
+ *   1. Canadian products are often entered with French as the primary
+ *      language, so the generic `product_name` is French even when a real
+ *      `product_name_en` exists. (Asking the API for lc=en does not help -
+ *      verified; it returns the same generic name.)
+ *   2. `product_name_en` itself frequently contains French text, because the
+ *      package is bilingual and whoever added it pasted the wrong side.
+ *      Barcode 0063211019537 is exactly this: lang=en, and all three name
+ *      fields hold "Campbell's soupe tomate".
+ *
+ * So each candidate is checked for what it actually reads as, not just which
+ * field it came from.
+ */
+function pickProductName(p) {
+  const clean = (v) => (typeof v === 'string' ? v.trim() : '');
+  const primaryLang = clean(p.lang || p.lc).toLowerCase();
+  const genericIsEnglish = !primaryLang || primaryLang === 'en';
+
+  const candidates = [
+    { text: clean(p.product_name_en), claimsEnglish: true },
+    { text: clean(p.generic_name_en), claimsEnglish: true },
+    { text: clean(p.product_name),    claimsEnglish: genericIsEnglish },
+    { text: clean(p.generic_name),    claimsEnglish: genericIsEnglish },
+    { text: clean(p.product_name_fr), claimsEnglish: false, language: 'fr' }
+  ].filter((c) => c.text);
+
+  if (!candidates.length) return null;
+
+  // First choice: a field that claims to be English AND does not read as
+  // another language.
+  for (const c of candidates) {
+    if (c.claimsEnglish && !detectNameLanguage(c.text)) {
+      return { name: c.text, language: 'en' };
+    }
+  }
+
+  // Nothing genuinely English is on file. Use the best name available and
+  // report the language honestly, so the form can say so.
+  const best = candidates[0];
+  const language = detectNameLanguage(best.text) || best.language || primaryLang || 'unknown';
+  return { name: best.text, language, noEnglishOnFile: true };
+}
+
+/**
+ * Look a barcode up on Open Food Facts. Returns null when the product is
+ * unknown or the network is unavailable - callers must cope with that.
+ */
+async function lookupProduct(code) {
+  // lang/lc tell us which language the generic product_name is written in;
+  // the _en variants are what we actually want when they exist.
+  const url = `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json`
+            + '?fields=product_name,product_name_en,product_name_fr,generic_name,generic_name_en'
+            + ',lang,lc,brands,categories_tags,categories_tags_en,quantity';
+  let data;
+  try {
+    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (!res.ok) return null;
+    data = await res.json();
+  } catch (err) {
+    console.info('Product lookup failed (offline or blocked):', err);
+    return null;
+  }
+  if (!data || data.status !== 1 || !data.product) return null;
+
+  const p = data.product;
+  const picked = pickProductName(p);
+  if (!picked) return null;
+  return {
+    name: picked.name,
+    language: picked.language,
+    noEnglishOnFile: !!picked.noEnglishOnFile,
+    category: categoryFromOFF(p.categories_tags_en, p.categories_tags),
+    brands: (p.brands || '').trim(),
+    quantity: (p.quantity || '').trim()
+  };
+}
+
+
+/* ---------- Wiring the scan button into the add/edit form ---------- */
+
+let formBarcode = '';     // barcode attached to the item currently being edited
+
+function renderBarcodeChip(note) {
+  const chip = $('#barcodeChip');
+  if (!formBarcode) { chip.hidden = true; return; }
+  chip.hidden = false;
+  $('#barcodeValue').textContent = formBarcode;
+  $('#barcodeNote').textContent = note
+    || (barcodeColumnExists ? '' : 'Not saved - run migration 002 to keep barcodes.');
+}
+
+function setFormBarcode(code, note) {
+  formBarcode = code || '';
+  renderBarcodeChip(note);
+  checkDuplicatesInForm();
+}
+
+/** Scan, then try to fill in the blanks. Every step degrades gracefully. */
+async function scanIntoForm() {
+  const code = await openScanner();
+  if (!code) return;                       // cancelled, or the camera failed
+
+  setFormBarcode(code, 'Looking up product...');
+  toast(`Scanned ${code}`);
+
+  // If this exact barcode is already in the inventory, that beats any lookup.
+  const known = state.items.find((i) => i.barcode && i.barcode === code);
+  if (known) {
+    if (!$('#fName').value.trim()) $('#fName').value = known.name;
+    if (state.settings.categories.includes(known.category)) $('#fCat').value = known.category;
+    if (known.unit && state.settings.units.includes(known.unit)) $('#fUnit').value = known.unit;
+    renderBarcodeChip('Already in your inventory - see the duplicate note above.');
+    checkDuplicatesInForm();
+    return;
+  }
+
+  const product = await lookupProduct(code);
+  if (!product) {
+    renderBarcodeChip('Not in the product database - type the name yourself.');
+    $('#fName').focus();
+    return;
+  }
+
+  // Only fill fields the user has not already filled in.
+  if (!$('#fName').value.trim()) $('#fName').value = product.name;
+  if (product.category) $('#fCat').value = product.category;
+  const extra = [product.brands, product.quantity].filter(Boolean).join(' - ');
+  if (extra && !$('#fNotes').value.trim()) $('#fNotes').value = extra;
+
+  // Say so when only a non-English name was on file, so an unexpected
+  // "Soupe aux pois" reads as the database's doing rather than a bug.
+  const LANGUAGE_NAMES = { fr: 'French', es: 'Spanish', de: 'German', it: 'Italian', nl: 'Dutch', pt: 'Portuguese' };
+  const notes = [`Matched: ${product.name}`];
+  if (product.language && product.language !== 'en') {
+    const lang = LANGUAGE_NAMES[product.language] || product.language;
+    notes.push(`no English name on file, this one is ${lang} - edit it if you like`);
+  }
+  if (!product.category) notes.push('category unknown - pick one');
+  renderBarcodeChip(notes.join(' - '));
+  checkDuplicatesInForm();
+}
+
+
+/* ==========================================================================
+   9. CONNECTION SETUP SCREEN
    ========================================================================== */
 
 /** Open the setup dialog. When nothing is configured yet it cannot be dismissed. */
@@ -1793,8 +2336,28 @@ function renderConnectionSummary() {
 function registerServiceWorker() {
   if (!('serviceWorker' in navigator)) return;
   if (!/^https?:$/.test(location.protocol)) return;
+
+  // True only if this page was already being served by an older worker.
+  // On a first-ever visit clients.claim() also fires controllerchange, and
+  // reloading then would be a pointless flash.
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloading = false;
+
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || reloading) return;
+    reloading = true;
+    // A new worker has taken over, so the markup and script in this tab are
+    // the previous version. Reload once to pick up the new one.
+    location.reload();
+  });
+
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('sw.js')
+      .then((reg) => {
+        // Catch a new deploy while the app is sitting open.
+        reg.addEventListener('updatefound', () => console.info('New version downloading...'));
+        reg.update().catch(() => { /* offline; try again next launch */ });
+      })
       .catch((err) => console.warn('Service worker did not register:', err));
   });
 }
