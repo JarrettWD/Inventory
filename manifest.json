@@ -1,6 +1,6 @@
 {
-  "name": "Basement Food Inventory Tracker",
-  "short_name": "Food Stock",
+  "name": "Inventory Tracker",
+  "short_name": "Inventory",
   "description": "Track what food is in the basement, what is expiring soon, and what to buy.",
   "start_url": "./",
   "scope": "./",
