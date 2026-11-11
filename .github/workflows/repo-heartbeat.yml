@@ -1,0 +1,95 @@
+# ===========================================================================
+# Repository heartbeat
+#
+# GitHub disables scheduled workflows in a repository with no commit activity
+# for 60 days. The only scheduled workflow here is the Supabase keep-alive, so
+# if commits stop: the keep-alive stops, then the Supabase project pauses. A
+# two-step failure with no warning.
+#
+# This commits a timestamp once a month, which resets that clock. Monthly
+# leaves roughly two months of margin.
+#
+# Generic by design - nothing below is specific to this project, so the file
+# can be copied into another repository unchanged.
+# ===========================================================================
+
+name: Repo heartbeat
+
+on:
+  schedule:
+    # 09:17 UTC on the 1st of each month. Off the hour on purpose: GitHub
+    # delays scheduled runs when many fire at once.
+    - cron: '17 9 1 * *'
+  workflow_dispatch:          # run by hand from the Actions tab
+
+# Only this workflow writes to the repository. The keep-alive stays read-only.
+permissions:
+  contents: write
+
+concurrency:
+  group: repo-heartbeat
+  cancel-in-progress: false
+
+jobs:
+  heartbeat:
+    name: Commit a timestamp
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@v4
+        with:
+          # Keeps the GITHUB_TOKEN credentials available to the push below.
+          # This is the default; stated explicitly so the file reads clearly
+          # when reused elsewhere.
+          persist-credentials: true
+
+      - name: Write the heartbeat file
+        run: |
+          set -euo pipefail
+          mkdir -p .github
+          printf 'Last heartbeat: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > .github/heartbeat.txt
+          cat .github/heartbeat.txt
+
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          # Stage ONLY the heartbeat file, so nothing else in the tree can be
+          # swept into the commit.
+          git add .github/heartbeat.txt
+
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+            exit 0
+          fi
+
+          # [skip ci] stops this push from kicking off other workflow runs.
+          git commit -m 'chore: heartbeat [skip ci]'
+
+          # Retry in case something else pushed in the meantime.
+          for attempt in 1 2 3; do
+            if git push; then
+              echo "Pushed on attempt ${attempt}."
+              exit 0
+            fi
+            echo "Push failed; rebasing and retrying..."
+            git pull --rebase --autostash || true
+            sleep 5
+          done
+          echo "::error::Could not push the heartbeat commit."
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Repo heartbeat"
+            echo
+            echo "- File: \`.github/heartbeat.txt\`"
+            echo "- Contents: \`$(cat .github/heartbeat.txt 2>/dev/null || echo 'not written')\`"
+            echo "- Commit: \`$(git log -1 --format='%h %s' 2>/dev/null)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
