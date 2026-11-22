@@ -25,6 +25,8 @@ create table if not exists public.inventory (
   on_list     boolean     not null default false,                    -- "always keep on the shopping list"
   barcode     text,                                                  -- EAN/UPC from the scanner, if scanned
   notes       text,
+  depleted_at      timestamptz,                                      -- when qty last hit 0; null while in stock
+  last_restock_qty numeric(8,2),                                     -- peak qty this stock cycle; prefills Restock
 
   updated_at  timestamptz not null default now()
 );

@@ -263,6 +263,23 @@ details.optional summary{
 .dup-warn ul{margin:0 0 8px; padding-left:18px; font-size:.87rem}
 .dup-warn li{margin:3px 0}
 
+/* ---------- Out-of-stock parking lot ---------- */
+.parked-toggle{
+  display:flex; align-items:center; gap:10px; width:100%;
+  min-height:var(--tap); padding:0; cursor:pointer;
+  background:none; border:0; color:var(--text);
+  font-size:1.15rem; font-weight:650; text-align:left;
+}
+.parked-toggle .grow{flex:1}
+.parked-toggle .chev{
+  display:inline-block; font-size:.8rem; color:var(--text-dim);
+  transition:transform .15s;
+}
+.parked-toggle[aria-expanded="true"] .chev{transform:rotate(90deg)}
+.item.is-parked{opacity:.82}
+.item.is-parked .qty{background:var(--danger-bg); color:var(--danger)}
+.badge.parked{background:var(--danger-bg); color:var(--danger); border-color:transparent}
+
 /* ---------- Connection bar ---------- */
 #connBar{
   padding:10px 14px; font-size:.85rem; font-weight:600; text-align:center;
@@ -374,6 +391,17 @@ details.optional summary{
     <div class="card">
       <p class="small muted" id="invCount"></p>
       <ul class="list" id="listInventory"></ul>
+    </div>
+
+    <!-- Parking lot. Lives inside Inventory so it shares the search and the
+         category/location filters above, rather than duplicating them. -->
+    <div class="card" id="parkedCard" hidden>
+      <button type="button" class="parked-toggle" id="btnToggleParked" aria-expanded="false" aria-controls="listParked">
+        <span class="chev" aria-hidden="true">&#9654;</span>
+        <span class="grow">Out of Stock (<span id="parkedCount">0</span>)</span>
+      </button>
+      <p class="small muted" id="parkedHint" hidden>Nothing here matches the filters above.</p>
+      <ul class="list" id="listParked" hidden></ul>
     </div>
   </section>
 
@@ -536,6 +564,33 @@ details.optional summary{
     <div class="dlg-foot">
       <button type="button" class="btn danger" id="btnDelete" hidden>Delete</button>
       <button type="submit" class="btn primary" id="btnSave">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ RESTOCK A PARKED ITEM ============ -->
+<dialog id="restockDialog" aria-labelledby="restockTitle">
+  <form id="restockForm" method="dialog">
+    <div class="dlg-head">
+      <h2 id="restockTitle">Restock</h2>
+      <button type="button" class="btn sm" id="btnRestockClose">Cancel</button>
+    </div>
+    <div class="dlg-body">
+      <p class="small muted" id="restockWhat"></p>
+      <div class="field">
+        <label for="fRestockQty">How many? *</label>
+        <input id="fRestockQty" type="number" inputmode="decimal" min="0.5" step="0.5" required>
+        <div class="hint small muted" id="restockPrefillNote"></div>
+      </div>
+      <div class="field">
+        <label for="fRestockExpiry">Expiry / best before <span class="hint">of the new batch - leave blank if none</span></label>
+        <input id="fRestockExpiry" type="date">
+      </div>
+      <p class="small muted">Restocking starts a new batch: the stock date is set to today and
+        &ldquo;opened&rdquo; is cleared. The old batch&rsquo;s expiry is not carried over.</p>
+    </div>
+    <div class="dlg-foot">
+      <button type="submit" class="btn primary" id="btnRestockSave">Restock</button>
     </div>
   </form>
 </dialog>
@@ -749,6 +804,11 @@ function fromRow(row) {
     onList: !!row.on_list,
     barcode: row.barcode || '',
     notes: row.notes || '',
+    // Trigger-owned (migration 004). Read here, never written back.
+    depletedAt: row.depleted_at || '',
+    lastRestockQty: row.last_restock_qty === null || row.last_restock_qty === undefined
+      ? null
+      : Number(row.last_restock_qty),
     updatedAt: row.updated_at || ''
   };
 }
@@ -762,6 +822,12 @@ let barcodeColumnExists = false;
    is false every item is treated as watched, which is exactly how the app
    behaved before the toggle existed. */
 let lowStockToggleColumnExists = false;
+
+/* Set once at start-up: false when migration 004 has not been run. The
+   parking lot itself still works without it - parked is derived from qty = 0 -
+   but there is no "ran out X days ago" and the Restock prompt falls back to 1.
+   Neither column is ever written by the app; the trigger owns both. */
+let parkingColumnsExist = false;
 
 function toRow(item) {
   const row = {
@@ -797,10 +863,15 @@ async function columnExists(column) {
 
 /** Probe every optional column once, at start-up. */
 async function detectOptionalColumns() {
-  [barcodeColumnExists, lowStockToggleColumnExists] = await Promise.all([
+  [barcodeColumnExists, lowStockToggleColumnExists, parkingColumnsExist] = await Promise.all([
     columnExists('barcode'),
-    columnExists('low_stock_enabled')
+    columnExists('low_stock_enabled'),
+    columnExists('depleted_at,last_restock_qty')
   ]);
+  if (!parkingColumnsExist) {
+    console.info('No depleted_at/last_restock_qty columns - run supabase/004-out-of-stock-parking.sql. '
+               + 'Until then the parking lot works but cannot show when something ran out.');
+  }
   if (!barcodeColumnExists) {
     console.info('No barcode column - run supabase/002-add-barcode.sql to store scanned barcodes.');
   }
@@ -910,6 +981,7 @@ async function loadItems({ quiet = false } = {}) {
 /** Load household preferences (local) and then the inventory (cloud). */
 async function load() {
   state.settings = { ...DEFAULT_SETTINGS, ...readLocal(STORAGE_KEY + '.settings', {}) };
+  parkedOpen = readLocal(STORAGE_KEY + '.parkedOpen', false) === true;
   const saved = readLocal(CONNECTION_KEY, null);
   conn.configured = applyConnection(saved || (typeof window !== 'undefined' && window.APP_CONFIG) || {});
   if (conn.configured) {
@@ -1108,6 +1180,44 @@ function lowStockThreshold(item) {
 }
 
 /** Low stock rule: quantity is at or below the threshold. */
+/* ---------- Out-of-stock parking lot ---------- */
+
+/**
+ * An item is parked when it has run out. Derived from quantity alone, with
+ * nothing stored, so anything that brings it back above zero by any route -
+ * an edit, a restock, another device - returns it to the main list without a
+ * flag needing to be cleared.
+ */
+function isParked(item) {
+  return Number(item.qty) <= 0;
+}
+
+/** Items still on the shelves. */
+function inStock(items) {
+  return items.filter((i) => !isParked(i));
+}
+
+/** How long ago it ran out, in words. Null when migration 004 has not run. */
+function depletedPhrase(item) {
+  if (!item.depletedAt) return 'ran out (date unknown)';
+  const days = Math.floor((Date.now() - new Date(item.depletedAt).getTime()) / 86400000);
+  if (days <= 0) return 'ran out today';
+  if (days === 1) return 'ran out yesterday';
+  if (days < 31) return `ran out ${days} days ago`;
+  const months = Math.round(days / 30);
+  return `ran out about ${months} month${months === 1 ? '' : 's'} ago`;
+}
+
+/** Most recently depleted first; unknown dates last. */
+function sortByDepleted(list) {
+  return [...list].sort((a, b) => {
+    if (!a.depletedAt && !b.depletedAt) return a.name.localeCompare(b.name);
+    if (!a.depletedAt) return 1;
+    if (!b.depletedAt) return -1;
+    return b.depletedAt.localeCompare(a.depletedAt);
+  });
+}
+
 /**
  * Is this item watched for low stock at all?
  * Anything other than an explicit false counts as watched, so items saved
@@ -1260,6 +1370,30 @@ function itemRow(item, opts = {}) {
     ? `${formatDate(item.expiry)} &middot; ${expiryPhrase(days)}`
     : 'No expiry date';
 
+  // Parked rows swap the quantity stepper for Restock / Remove, and show
+  // when the item ran out instead of its stale expiry date.
+  if (opts.parked) {
+    return `
+      <li class="item is-parked">
+        <div class="qty">0<small>${esc(item.unit || '')}</small></div>
+        <div class="body">
+          <div class="name">${esc(item.name)}</div>
+          <div class="meta">${esc(item.category)} &middot; ${esc(item.location)}</div>
+          <div class="meta">${esc(depletedPhrase(item))}</div>
+          ${item.notes ? `<div class="meta">&ldquo;${esc(item.notes)}&rdquo;</div>` : ''}
+          <div class="badges">
+            <span class="badge parked">Out of stock</span>
+            ${item.onList || isLowStock(item) ? '<span class="badge low">On the shopping list</span>' : ''}
+          </div>
+        </div>
+        <div class="actions">
+          <button class="btn sm primary" data-act="restock" data-id="${item.id}">Restock</button>
+          <button class="btn sm" data-act="edit" data-id="${item.id}">Edit</button>
+          <button class="btn sm danger" data-act="remove-parked" data-id="${item.id}">Remove</button>
+        </div>
+      </li>`;
+  }
+
   return `
     <li class="item row-strip ${strip}">
       <div class="qty">${esc(item.qty)}<small>${esc(item.unit || '')}</small></div>
@@ -1290,9 +1424,13 @@ function renderList(el, items, emptyMsg, opts = {}) {
 
 function renderDashboard() {
   const items = state.items;
-  const expired  = items.filter((i) => expiryStatus(i) === 'expired');
-  const expiring = items.filter((i) => expiryStatus(i) === 'expiring');
-  const noDate   = items.filter((i) => expiryStatus(i) === 'none');
+  // Expiry only means something for food you actually have, so the parked
+  // items are left out of every expiry figure and list.
+  const shelf    = inStock(items);
+  const parked   = items.filter(isParked);
+  const expired  = shelf.filter((i) => expiryStatus(i) === 'expired');
+  const expiring = shelf.filter((i) => expiryStatus(i) === 'expiring');
+  const noDate   = shelf.filter((i) => expiryStatus(i) === 'none');
   const low      = items.filter(isLowStock);
   const groups   = duplicateGroups();
   const units    = items.reduce((sum, i) => sum + (Number(i.qty) || 0), 0);
@@ -1303,6 +1441,7 @@ function renderDashboard() {
     { n: expired.length,  l: 'expired',            cls: 'is-danger', view: 'expiring', filter: 'expired' },
     { n: expiring.length, l: 'expiring soon',      cls: 'is-warn',   view: 'expiring', filter: 'expiring' },
     { n: low.length,      l: 'low stock',          cls: 'is-warn',   view: 'shopping', filter: 'low' },
+    { n: parked.length,   l: 'out of stock',       cls: 'is-danger', view: 'inventory', filter: 'parked' },
     { n: groups.length,   l: 'duplicate candidates', cls: 'is-info', view: 'inventory', filter: 'dup' },
     { n: noDate.length,   l: 'missing expiry date',  cls: 'is-info', view: 'inventory', filter: 'none' }
   ];
@@ -1312,7 +1451,7 @@ function renderDashboard() {
     </button>`).join('');
 
   // Use first: soonest to expire, expired items included.
-  const useFirst = sortByExpiry(items.filter((i) => ['expired', 'expiring'].includes(expiryStatus(i)))).slice(0, 5);
+  const useFirst = sortByExpiry(shelf.filter((i) => ['expired', 'expiring'].includes(expiryStatus(i)))).slice(0, 5);
   renderList($('#listUseFirst'), useFirst, 'Nothing needs using up right now.');
 
   // Duplicate groups, each sorted so the item to use first is at the top.
@@ -1347,7 +1486,9 @@ function renderInventory() {
   const sort = $('#fSort').value;
   const dupes = status === 'dup' ? duplicateIds() : null;
 
-  let list = state.items.filter((i) => {
+  // Search and the category/location filters apply to both lists, so the
+  // parking lot is filterable exactly like the main one with no extra UI.
+  const matchesFilters = (i) => {
     if (q) {
       const haystack = `${i.name} ${i.category} ${i.location} ${i.notes || ''}`.toLowerCase();
       // Match either the raw text or the normalized name, so "garbanzo"
@@ -1356,6 +1497,11 @@ function renderInventory() {
     }
     if (cat !== 'all' && i.category !== cat) return false;
     if (loc !== 'all' && i.location !== loc) return false;
+    return true;
+  };
+
+  let list = inStock(state.items).filter((i) => {
+    if (!matchesFilters(i)) return false;
     switch (status) {
       case 'expired':  return expiryStatus(i) === 'expired';
       case 'expiring': return expiryStatus(i) === 'expiring';
@@ -1373,8 +1519,41 @@ function renderInventory() {
   else if (sort === 'added') list.sort((a, b) => String(b.stockDate).localeCompare(String(a.stockDate)));
   else                       list = sortByExpiry(list);
 
-  $('#invCount').textContent = `${list.length} of ${state.items.length} items`;
+  const shelfTotal = inStock(state.items).length;
+  $('#invCount').textContent = `${list.length} of ${shelfTotal} in stock`;
   renderList($('#listInventory'), list, 'No items match. Try clearing the filters.', { showFresh: true });
+
+  renderParked(matchesFilters);
+}
+
+/* ---------- The parking lot, inside the Inventory view ---------- */
+
+let parkedOpen = false;     // restored from localStorage at start-up
+
+function renderParked(matchesFilters) {
+  const all = state.items.filter(isParked);
+  const shown = sortByDepleted(all.filter(matchesFilters));
+
+  const card = $('#parkedCard');
+  card.hidden = all.length === 0;        // nothing parked at all: hide entirely
+  $('#parkedCount').textContent = all.length;
+  $('#btnToggleParked').setAttribute('aria-expanded', String(parkedOpen));
+
+  // The count is always the true total; the filters only narrow what is listed.
+  const emptyUnderFilter = parkedOpen && all.length > 0 && shown.length === 0;
+  $('#parkedHint').hidden = !emptyUnderFilter;
+  $('#listParked').hidden = !parkedOpen || emptyUnderFilter;
+  // Always rewrite, so a filter that matches nothing cannot leave the
+  // previous rows sitting in the DOM.
+  $('#listParked').innerHTML = parkedOpen
+    ? shown.map((i) => itemRow(i, { parked: true })).join('')
+    : '';
+}
+
+function setParkedOpen(open) {
+  parkedOpen = !!open;
+  writeLocal(STORAGE_KEY + '.parkedOpen', parkedOpen);
+  renderInventory();
 }
 
 /* ---------- Expiring soon (expired first, then 0-30 / 31-60 / 61-90) ---------- */
@@ -1391,7 +1570,9 @@ function renderExpiring() {
   if (win > 90) buckets.push({ title: `91 to ${win} days`, test: (d) => d > 90 && d <= win, empty: 'Nothing in this window.' });
 
   $('#expiringGroups').innerHTML = buckets.map((b) => {
-    const rows = sortByExpiry(state.items.filter((i) => {
+    // Parked items are excluded: expiry is meaningless for stock you do
+    // not have, and a restock clears the old batch's dates anyway.
+    const rows = sortByExpiry(inStock(state.items).filter((i) => {
       const d = daysUntil(i.expiry);
       return d !== null && b.test(d);
     }));
@@ -1406,7 +1587,7 @@ function renderExpiring() {
         <ul class="list" id="listExpNoDate"></ul>
       </div>`;
 
-  renderList($('#listExpNoDate'), state.items.filter((i) => !i.expiry), 'Every item has a date.');
+  renderList($('#listExpNoDate'), inStock(state.items).filter((i) => !i.expiry), 'Every item has a date.');
 }
 
 /* ---------- Shopping list ---------- */
@@ -1567,16 +1748,32 @@ function checkDuplicatesInForm() {
   const exactRest = exact.filter((i) => !seen.has(i.id));
   const similarRest = similar.filter((i) => !seen.has(i.id));
 
-  if (!byBarcode.length && !exactRest.length && !similarRest.length) { box.innerHTML = ''; return; }
+  const parkedByName = candidate.name.length >= 2
+    ? state.items.find((i) => i.id !== editingId && isParked(i)
+        && normalizeName(i.name) === normalizeName(candidate.name))
+    : null;
+
+  if (!byBarcode.length && !exactRest.length && !similarRest.length && !parkedByName) {
+    box.innerHTML = ''; return;
+  }
 
   const line = (i) => `<li><strong>${esc(i.name)}</strong> &ndash; ${esc(i.qty)} ${esc(i.unit || '')} in
       ${esc(i.location)} &middot; ${i.expiry ? esc(expiryPhrase(daysUntil(i.expiry))) : 'no expiry date'}</li>`;
 
-  const mergeTarget = byBarcode[0] || exactRest[0];
+  // A parked match is the most useful answer: restock it rather than creating
+  // a second record. Uses the same normalised matching as everything else,
+  // so plurals and wording differences are caught too.
+  const parkedMatch = parkedByName || [...byBarcode, ...exact, ...similar].find(isParked) || null;
+
+  const mergeTarget = [byBarcode[0], exactRest[0]].find((i) => i && !isParked(i));
 
   box.innerHTML = `
     <div class="dup-warn">
       <h3>You may already have this</h3>
+      ${parkedMatch ? `<p class="small"><strong>${esc(parkedMatch.name)}</strong> is already in
+          Out of Stock &ndash; ${esc(depletedPhrase(parkedMatch))}. Restock it instead of adding
+          a second record, or carry on below to add a separate item.</p>
+        <button type="button" class="btn sm" data-act="restock-instead" data-id="${parkedMatch.id}">Restock instead</button>` : ''}
       ${byBarcode.length ? `<p class="small">Same barcode:</p><ul>${byBarcode.map(line).join('')}</ul>` : ''}
       ${exactRest.length ? `<p class="small">Same name, category and location:</p><ul>${exactRest.map(line).join('')}</ul>` : ''}
       ${similarRest.length ? `<p class="small">Similar items elsewhere:</p><ul>${similarRest.map(line).join('')}</ul>` : ''}
@@ -1662,6 +1859,83 @@ async function deleteItem(id, { confirmFirst = true } = {}) {
   }
 }
 
+/* ==========================================================================
+   RESTOCKING A PARKED ITEM
+   ========================================================================== */
+
+let restockingId = null;
+
+/** Open the restock prompt, prefilled with the peak of the last stock cycle. */
+function openRestock(id) {
+  const item = state.items.find((i) => i.id === id);
+  if (!item) return;
+  restockingId = id;
+
+  const prefill = item.lastRestockQty && item.lastRestockQty > 0 ? item.lastRestockQty : 1;
+  $('#restockTitle').textContent = 'Restock';
+  $('#restockWhat').textContent =
+    `${item.name} - ${item.category}, ${item.location}. ${depletedPhrase(item)}.`;
+  $('#fRestockQty').value = prefill;
+  $('#fRestockExpiry').value = '';          // new batch: never inherit the old date
+  $('#restockPrefillNote').textContent = item.lastRestockQty && item.lastRestockQty > 0
+    ? `Last time you had ${item.lastRestockQty} ${item.unit || ''}`.trim()
+    : (parkingColumnsExist ? 'No previous quantity recorded.'
+                           : 'Run migration 004 to remember previous quantities.');
+
+  $('#restockDialog').showModal();
+  setTimeout(() => $('#fRestockQty').select(), 50);
+}
+
+/**
+ * Put an item back on the shelves. A restock is a NEW batch, so the stock
+ * date resets to today, "opened" is cleared, and the expiry is whatever was
+ * entered here rather than the old batch's date.
+ *
+ * depleted_at and last_restock_qty are not sent: the database trigger clears
+ * the one and resets the other, which keeps them right even when another
+ * device is doing the same thing.
+ */
+async function saveRestock(event) {
+  event.preventDefault();
+  const item = state.items.find((i) => i.id === restockingId);
+  if (!item) { $('#restockDialog').close(); return; }
+
+  const qty = Number($('#fRestockQty').value);
+  if (!Number.isFinite(qty) || qty <= 0) { $('#fRestockQty').focus(); return; }
+
+  const before = { ...item };
+  Object.assign(item, {
+    qty,
+    expiry: $('#fRestockExpiry').value || '',
+    stockDate: todayISO(),
+    opened: false
+  });
+  $('#restockDialog').close();
+  render();
+
+  try {
+    const saved = await apiUpdate(item.id, item);
+    if (saved) Object.assign(item, saved);   // picks up the trigger's values
+    cacheItems();
+    render();
+    toast(`${item.name} restocked`);
+  } catch (err) {
+    Object.assign(item, before);
+    failed('Could not restock the item', err);
+    render();
+  }
+}
+
+/** Permanent removal from the parking lot, for things not being bought again. */
+async function removeParked(id) {
+  const item = state.items.find((i) => i.id === id);
+  if (!item) return;
+  if (!confirm(`Remove "${item.name}" permanently?\n\n`
+             + 'It disappears for everyone and cannot be undone. '
+             + 'Leave it parked instead if you might buy it again.')) return;
+  await deleteItem(id, { confirmFirst: false });
+}
+
 /**
  * Change quantity by a step, never below zero.
  * Updated on screen first so the +/- buttons stay instant, then written to
@@ -1742,9 +2016,18 @@ function wireEvents() {
     else if (act === 'goto') {
       showView(btn.dataset.view);
       if (btn.dataset.view === 'inventory') {
-        $('#fStatus').value = btn.dataset.filter;
-        $('#q').value = '';
-        renderInventory();
+        if (btn.dataset.filter === 'parked') {
+          // The parking lot is a section, not a status filter: clear the
+          // filters so nothing is hidden, and open the section.
+          $('#fStatus').value = 'all';
+          $('#q').value = '';
+          setParkedOpen(true);
+          $('#parkedCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        } else {
+          $('#fStatus').value = btn.dataset.filter;
+          $('#q').value = '';
+          renderInventory();
+        }
       }
     } else if (act === 'merge') {
       // Duplicate warning: add one to the item that already exists instead.
@@ -1757,8 +2040,21 @@ function wireEvents() {
       refreshFromCloud();
     } else if (act === 'setup') {
       openSetup({ firstRun: !conn.configured });
+    } else if (act === 'restock') {
+      openRestock(id);
+    } else if (act === 'remove-parked') {
+      removeParked(id);
+    } else if (act === 'restock-instead') {
+      // From the duplicate warning on the add form.
+      $('#itemDialog').close();
+      openRestock(id);
     }
   });
+
+  // Parking lot
+  $('#btnToggleParked').addEventListener('click', () => setParkedOpen(!parkedOpen));
+  $('#restockForm').addEventListener('submit', saveRestock);
+  $('#btnRestockClose').addEventListener('click', () => $('#restockDialog').close());
 
   // Connection setup
   $('#setupForm').addEventListener('submit', saveSetup);
