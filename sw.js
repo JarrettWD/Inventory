@@ -15,7 +15,7 @@
    already installed an older copy pick the new one up.
    ========================================================================== */
 
-const CACHE_VERSION = 'v9';   // v9: out-of-stock parking lot
+const CACHE_VERSION = 'v11';  // v11: segmented toggle; removal moved into the Edit form
 const CACHE_NAME = `food-inventory-shell-${CACHE_VERSION}`;
 
 /* Files the app needs to start. Relative paths so it works from a subfolder

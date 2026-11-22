@@ -263,19 +263,36 @@ details.optional summary{
 .dup-warn ul{margin:0 0 8px; padding-left:18px; font-size:.87rem}
 .dup-warn li{margin:3px 0}
 
-/* ---------- Out-of-stock parking lot ---------- */
-.parked-toggle{
-  display:flex; align-items:center; gap:10px; width:100%;
-  min-height:var(--tap); padding:0; cursor:pointer;
-  background:none; border:0; color:var(--text);
-  font-size:1.15rem; font-weight:650; text-align:left;
+/* ---------- In stock / Out of stock segmented control ---------- */
+.segmented{
+  display:grid; grid-template-columns:1fr 1fr; gap:4px;
+  padding:4px; border-radius:12px;
+  background:var(--surface-2); border:1px solid var(--border);
 }
-.parked-toggle .grow{flex:1}
-.parked-toggle .chev{
-  display:inline-block; font-size:.8rem; color:var(--text-dim);
-  transition:transform .15s;
+.segmented button{
+  display:flex; align-items:center; justify-content:center; gap:7px;
+  min-height:var(--tap);                 /* thumb-sized */
+  padding:8px 10px; border:0; border-radius:9px; cursor:pointer;
+  background:transparent; color:var(--text-dim);
+  font-size:.95rem; font-weight:650; line-height:1.2;
 }
-.parked-toggle[aria-expanded="true"] .chev{transform:rotate(90deg)}
+.segmented button[aria-selected="true"]{
+  background:var(--surface); color:var(--text);
+  box-shadow:0 1px 2px rgba(0,0,0,.08);
+}
+.seg-count{
+  display:inline-block; min-width:22px; padding:1px 7px; border-radius:999px;
+  background:var(--border); color:var(--text-dim);
+  font-size:.78rem; font-weight:700;
+}
+.segmented button[aria-selected="true"] .seg-count{background:var(--surface-2)}
+/* Draw the eye only when something is actually out of stock. */
+.seg-count.is-alert{background:var(--danger); color:#fff}
+
+/* Filters that do not apply to the parked side are visibly inert. */
+.filters select:disabled{opacity:.45; cursor:not-allowed}
+
+/* ---------- Out-of-stock rows ---------- */
 .item.is-parked{opacity:.82}
 .item.is-parked .qty{background:var(--danger-bg); color:var(--danger)}
 .badge.parked{background:var(--danger-bg); color:var(--danger); border-color:transparent}
@@ -388,20 +405,20 @@ details.optional summary{
         </select>
       </div>
     </div>
+    <!-- Which half of the inventory to show. Sits directly under the filters
+         so both sides share the search and category/location controls. -->
+    <div class="segmented" role="tablist" aria-label="Stock status">
+      <button type="button" role="tab" data-side="in" id="segIn" aria-selected="true" aria-controls="listInventory">
+        In stock <span class="seg-count" id="segInCount">0</span>
+      </button>
+      <button type="button" role="tab" data-side="out" id="segOut" aria-selected="false" aria-controls="listInventory">
+        Out of stock <span class="seg-count" id="segOutCount">0</span>
+      </button>
+    </div>
+
     <div class="card">
       <p class="small muted" id="invCount"></p>
       <ul class="list" id="listInventory"></ul>
-    </div>
-
-    <!-- Parking lot. Lives inside Inventory so it shares the search and the
-         category/location filters above, rather than duplicating them. -->
-    <div class="card" id="parkedCard" hidden>
-      <button type="button" class="parked-toggle" id="btnToggleParked" aria-expanded="false" aria-controls="listParked">
-        <span class="chev" aria-hidden="true">&#9654;</span>
-        <span class="grow">Out of Stock (<span id="parkedCount">0</span>)</span>
-      </button>
-      <p class="small muted" id="parkedHint" hidden>Nothing here matches the filters above.</p>
-      <ul class="list" id="listParked" hidden></ul>
     </div>
   </section>
 
@@ -981,7 +998,6 @@ async function loadItems({ quiet = false } = {}) {
 /** Load household preferences (local) and then the inventory (cloud). */
 async function load() {
   state.settings = { ...DEFAULT_SETTINGS, ...readLocal(STORAGE_KEY + '.settings', {}) };
-  parkedOpen = readLocal(STORAGE_KEY + '.parkedOpen', false) === true;
   const saved = readLocal(CONNECTION_KEY, null);
   conn.configured = applyConnection(saved || (typeof window !== 'undefined' && window.APP_CONFIG) || {});
   if (conn.configured) {
@@ -1389,7 +1405,6 @@ function itemRow(item, opts = {}) {
         <div class="actions">
           <button class="btn sm primary" data-act="restock" data-id="${item.id}">Restock</button>
           <button class="btn sm" data-act="edit" data-id="${item.id}">Edit</button>
-          <button class="btn sm danger" data-act="remove-parked" data-id="${item.id}">Remove</button>
         </div>
       </li>`;
   }
@@ -1500,7 +1515,36 @@ function renderInventory() {
     return true;
   };
 
-  let list = inStock(state.items).filter((i) => {
+  const shelf  = inStock(state.items);
+  const parked = state.items.filter(isParked);
+
+  // Counts on the toggle are always the true totals, so the filters never
+  // make it look as though stock has disappeared.
+  $('#segInCount').textContent = shelf.length;
+  $('#segOutCount').textContent = parked.length;
+  $('#segOutCount').classList.toggle('is-alert', parked.length > 0);
+  $('#segIn').setAttribute('aria-selected', String(inventorySide === 'in'));
+  $('#segOut').setAttribute('aria-selected', String(inventorySide === 'out'));
+
+  // Status and sort describe food on the shelves; neither means anything for
+  // an empty slot, and the parked side is always sorted by when it ran out.
+  const parkedSide = inventorySide === 'out';
+  $('#fStatus').disabled = parkedSide;
+  $('#fSort').disabled = parkedSide;
+
+  if (parkedSide) {
+    const shown = sortByDepleted(parked.filter(matchesFilters));
+    $('#invCount').textContent = parked.length
+      ? `${shown.length} of ${parked.length} out of stock · most recently depleted first`
+      : '';
+    renderList($('#listInventory'), shown,
+      parked.length ? 'No out-of-stock items match. Try clearing the filters.'
+                    : 'Nothing is out of stock.',
+      { parked: true });
+    return;
+  }
+
+  let list = shelf.filter((i) => {
     if (!matchesFilters(i)) return false;
     switch (status) {
       case 'expired':  return expiryStatus(i) === 'expired';
@@ -1519,40 +1563,18 @@ function renderInventory() {
   else if (sort === 'added') list.sort((a, b) => String(b.stockDate).localeCompare(String(a.stockDate)));
   else                       list = sortByExpiry(list);
 
-  const shelfTotal = inStock(state.items).length;
-  $('#invCount').textContent = `${list.length} of ${shelfTotal} in stock`;
+  $('#invCount').textContent = `${list.length} of ${shelf.length} in stock`;
   renderList($('#listInventory'), list, 'No items match. Try clearing the filters.', { showFresh: true });
-
-  renderParked(matchesFilters);
 }
 
-/* ---------- The parking lot, inside the Inventory view ---------- */
+/* ---------- Which side of the Inventory view is showing ---------- */
 
-let parkedOpen = false;     // restored from localStorage at start-up
+/* Deliberately not persisted: the side is remembered while moving between
+   tabs in a session, but a fresh load always opens on "In stock". */
+let inventorySide = 'in';
 
-function renderParked(matchesFilters) {
-  const all = state.items.filter(isParked);
-  const shown = sortByDepleted(all.filter(matchesFilters));
-
-  const card = $('#parkedCard');
-  card.hidden = all.length === 0;        // nothing parked at all: hide entirely
-  $('#parkedCount').textContent = all.length;
-  $('#btnToggleParked').setAttribute('aria-expanded', String(parkedOpen));
-
-  // The count is always the true total; the filters only narrow what is listed.
-  const emptyUnderFilter = parkedOpen && all.length > 0 && shown.length === 0;
-  $('#parkedHint').hidden = !emptyUnderFilter;
-  $('#listParked').hidden = !parkedOpen || emptyUnderFilter;
-  // Always rewrite, so a filter that matches nothing cannot leave the
-  // previous rows sitting in the DOM.
-  $('#listParked').innerHTML = parkedOpen
-    ? shown.map((i) => itemRow(i, { parked: true })).join('')
-    : '';
-}
-
-function setParkedOpen(open) {
-  parkedOpen = !!open;
-  writeLocal(STORAGE_KEY + '.parkedOpen', parkedOpen);
+function setInventorySide(side) {
+  inventorySide = side === 'out' ? 'out' : 'in';
   renderInventory();
 }
 
@@ -1698,7 +1720,10 @@ function openForm(item) {
   formBarcode = item ? (item.barcode || '') : '';
   renderBarcodeChip();
 
+  // Permanent removal lives here rather than on the parked rows, so it is not
+  // sitting next to Restock waiting to be mis-tapped.
   $('#btnDelete').hidden = !item;
+  $('#btnDelete').textContent = item && isParked(item) ? 'Remove permanently' : 'Delete';
   $('#errName').hidden = true;
   $('#dupWarn').innerHTML = '';
   $('#itemDialog').showModal();
@@ -1840,10 +1865,20 @@ function failed(what, err) {
   toast(`${what} - not saved`);
 }
 
+/**
+ * Permanent removal, reached from the bottom of the Edit form.
+ * A parked item gets a different warning: the useful advice there is that
+ * leaving it parked costs nothing if it might be bought again.
+ */
 async function deleteItem(id, { confirmFirst = true } = {}) {
   const item = state.items.find((i) => i.id === id);
   if (!item) return;
-  if (confirmFirst && !confirm(`Delete "${item.name}"? This removes it for everyone and cannot be undone.`)) return;
+  const question = isParked(item)
+    ? `Remove "${item.name}" permanently?\n\n`
+      + 'It disappears for everyone and cannot be undone. '
+      + 'Leave it in Out of stock instead if you might buy it again.'
+    : `Delete "${item.name}"? This removes it for everyone and cannot be undone.`;
+  if (confirmFirst && !confirm(question)) return;
 
   const before = state.items;
   state.items = state.items.filter((i) => i.id !== id);   // optimistic
@@ -1917,23 +1952,15 @@ async function saveRestock(event) {
     const saved = await apiUpdate(item.id, item);
     if (saved) Object.assign(item, saved);   // picks up the trigger's values
     cacheItems();
+    // Stay on whichever side we were on, so several items can be restocked
+    // in a row without hopping back and forth.
     render();
-    toast(`${item.name} restocked`);
+    toast(`${item.name} is back in stock`);
   } catch (err) {
     Object.assign(item, before);
     failed('Could not restock the item', err);
     render();
   }
-}
-
-/** Permanent removal from the parking lot, for things not being bought again. */
-async function removeParked(id) {
-  const item = state.items.find((i) => i.id === id);
-  if (!item) return;
-  if (!confirm(`Remove "${item.name}" permanently?\n\n`
-             + 'It disappears for everyone and cannot be undone. '
-             + 'Leave it parked instead if you might buy it again.')) return;
-  await deleteItem(id, { confirmFirst: false });
 }
 
 /**
@@ -2017,12 +2044,11 @@ function wireEvents() {
       showView(btn.dataset.view);
       if (btn.dataset.view === 'inventory') {
         if (btn.dataset.filter === 'parked') {
-          // The parking lot is a section, not a status filter: clear the
-          // filters so nothing is hidden, and open the section.
+          // Open Inventory with the Out of stock side already selected, and
+          // clear the filters so nothing is hidden behind them.
           $('#fStatus').value = 'all';
           $('#q').value = '';
-          setParkedOpen(true);
-          $('#parkedCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+          setInventorySide('out');
         } else {
           $('#fStatus').value = btn.dataset.filter;
           $('#q').value = '';
@@ -2042,8 +2068,6 @@ function wireEvents() {
       openSetup({ firstRun: !conn.configured });
     } else if (act === 'restock') {
       openRestock(id);
-    } else if (act === 'remove-parked') {
-      removeParked(id);
     } else if (act === 'restock-instead') {
       // From the duplicate warning on the add form.
       $('#itemDialog').close();
@@ -2051,8 +2075,10 @@ function wireEvents() {
     }
   });
 
-  // Parking lot
-  $('#btnToggleParked').addEventListener('click', () => setParkedOpen(!parkedOpen));
+  // In stock / Out of stock toggle
+  $$('.segmented button').forEach((b) =>
+    b.addEventListener('click', () => setInventorySide(b.dataset.side)));
+
   $('#restockForm').addEventListener('submit', saveRestock);
   $('#btnRestockClose').addEventListener('click', () => $('#restockDialog').close());
 
